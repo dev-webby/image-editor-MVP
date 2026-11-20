@@ -208,7 +208,7 @@ $('#scan').onclick=async()=>{
 
 // ---- Accounts and credits (Supabase) ----
 // Paste your own values. The publishable key is safe to be public. NEVER paste a secret key here.
-const SB_URL='PASTE_YOUR_PROJECT_URL_HERE', SB_KEY='PASTE_YOUR_PUBLISHABLE_KEY_HERE';
+const SB_URL='https://dkyhfzauzmrjcplmmvsa.supabase.co', SB_KEY='sb_publishable_owVMoPqk8SA3X3l0CHAsKg_0eidTJhI';
 const sb=SB_URL.startsWith('https://')?supabase.createClient(SB_URL,SB_KEY):null;
 let user=null;
 const dst=t=>{$('#dst').textContent=t};
