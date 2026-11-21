@@ -312,26 +312,60 @@ function add(boxes,label){
         x1=Math.max(...boxes.map(b=>b.x1))+p,y1=Math.max(...boxes.map(b=>b.y1))+p;
   regions.push({x:x0,y:y0,w:x1-x0,h:y1-y0,label,on:true});
 }
+const iou=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
+  if(w<=0||h<=0)return 0;const i=w*h;return i/(a.w*a.h+b.w*b.h-i)};
+const contain=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
+  return w>0&&h>0?w*h/Math.min(a.w*a.h,b.w*b.h):0};
+// ---- multi-scale face finding. BlazeFace sees only 128x128 pixels at a time, so we slide windows of several sizes
+// over the picture (small windows find small or distant faces) and keep a face only when it is confident or seen more than once.
+function faceWins(W,H,dense,hints){
+  const L=Math.max(W,H),out=[[0,0,W,H]],seen=new Set(['0,0,'+W+','+H]);
+  const add=(x,y,w,h)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));const k=x+','+y+','+w+','+h;if(!seen.has(k)){seen.add(k);out.push([x,y,w,h])}};
+  for(const f of dense?[.5,.3,.2,.14]:[.5,.3]){
+    const s=Math.round(L*f);if(s<90)continue;const w=Math.min(s,W),h=Math.min(s,H),st=Math.max(1,s/2);
+    for(let y=0;;y+=st){for(let x=0;;x+=st){add(x,y,w,h);if(x+w>=W)break}if(y+h>=H)break}
+  }
+  (hints||[]).forEach(b=>{const s=Math.max(96,Math.max(b.w,b.h)*3),cx=b.x+b.w/2,cy=b.y+b.h/2;add(cx-s/2,cy-s/2,Math.min(s,W),Math.min(s,H))});
+  return out;
+}
+function faceCluster(dets,W,H){
+  dets.sort((a,b)=>b.score-a.score);const cl=[];
+  for(const d of dets){
+    const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);
+    if(c){c.m.push(d)}else cl.push({top:d,m:[d]});
+  }
+  const minS=Math.max(10,Math.min(W,H)*.015),out=[];
+  for(const c of cl){
+    let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
+    const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
+    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H)continue;
+    if(b.score>=.75||(c.m.length>=2&&b.score>=.45)||c.m.length>=3)out.push(b);
+  }
+  return out;
+}
+const _tile=document.createElement('canvas');
+function runFaces(det,src,dense,hints){      // src: canvas holding the picture; det(canvas) -> MediaPipe detections
+  const W=src.width,H=src.height,dets=[];
+  for(const[x,y,w,h]of faceWins(W,H,dense,hints)){
+    let s=src,ox=0,oy=0;
+    if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
+    let r;try{r=det(s)}catch(e){continue}
+    for(const d of r.detections){const b=d.boundingBox;dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}
+  }
+  return faceCluster(dets,W,H);
+}
 let faceDet=null;
 const MP='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 async function findFaces(){
   if(!faceDet){
     const{FaceDetector,FilesetResolver}=await import(MP+'/vision_bundle.mjs');
     const fs=await FilesetResolver.forVisionTasks(MP+'/wasm');
-    faceDet=await FaceDetector.createFromOptions(fs,{runningMode:'IMAGE',minDetectionConfidence:.4,
+    faceDet=await FaceDetector.createFromOptions(fs,{runningMode:'IMAGE',minDetectionConfidence:.3,
       baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'}});
   }
-  const W=img.width,H=img.height,out=[],t=document.createElement('canvas');
-  const run=(sx,sy,sw,sh)=>{let src=img;if(sw<W||sh<H){t.width=Math.round(sw);t.height=Math.round(sh);t.getContext('2d').drawImage(img,sx,sy,sw,sh,0,0,t.width,t.height);src=t}
-    for(const d of faceDet.detect(src).detections){const b=d.boundingBox;out.push({originX:b.originX+(src===img?0:sx),originY:b.originY+(src===img?0:sy),width:b.width,height:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}};
-  run(0,0,W,H);                                  // whole picture, then overlapping tiles so small faces are found too
-  if(Math.max(W,H)>=640)for(let i=0;i<2;i++)for(let j=0;j<2;j++)run(i*.4*W,j*.4*H,.6*W,.6*H);
-  if(Math.max(W,H)>=1200)for(let i=0;i<3;i++)for(let j=0;j<3;j++)run(i*.3*W,j*.3*H,.4*W,.4*H);
-  const ov=(a,b)=>{const w=Math.min(a.originX+a.width,b.originX+b.width)-Math.max(a.originX,b.originX),h=Math.min(a.originY+a.height,b.originY+b.height)-Math.max(a.originY,b.originY);
-    return w>0&&h>0?w*h/Math.min(a.width*a.height,b.width*b.height):0};
-  const good=out.filter(b=>{const r=b.width/b.height;return r>.55&&r<1.8&&b.width*b.height<.45*W*H&&b.width>=Math.max(12,Math.min(W,H)*.015)}).sort((a,b)=>b.score-a.score),keep=[];
-  for(const b of good)if(!keep.some(k=>ov(k,b)>.5))keep.push(b);
-  return keep;
+  const k=Math.min(1,1600/Math.max(img.width,img.height)),ac=document.createElement('canvas');
+  ac.width=Math.round(img.width*k);ac.height=Math.round(img.height*k);ac.getContext('2d').drawImage(img,0,0,ac.width,ac.height);
+  return runFaces(c=>faceDet.detect(c),ac,true).map(b=>({originX:b.x/k,originY:b.y/k,width:b.w/k,height:b.h/k}));
 }
 $('#scan').onclick=async()=>{
   const st=$('#st'),on=[...document.querySelectorAll('.cat:checked')].map(c=>c.value);
@@ -354,7 +388,7 @@ $('#scan').onclick=async()=>{
     if(on.includes('face')){
       try{
         if(!faceDet)st.textContent='Loading face model (first time only)…';
-        (await findFaces()).forEach(b=>{const p=Math.max(b.width,b.height)*.15;
+        (await findFaces()).forEach(b=>{const p=Math.max(b.width,b.height)*.25;
           regions.push({x:b.originX-p,y:b.originY-p,w:b.width+2*p,h:b.height+2*p,label:'face',on:true})});
       }catch(e){msg=' Face model could not load. Check your connection or draw over faces by hand.'}
     }
