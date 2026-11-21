@@ -226,17 +226,22 @@ const contain=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math
 const mpDet=()=>fd;
 // ---- face finding: SSD-MobileNet (face-api) for recall, MediaPipe BlazeFace as a second opinion.
 // A face is kept only when it is confident or seen more than once, so objects and textures are not boxed.
-let ssd=null,ssdTried=false;
+let ssd=null,ssdTried=false,ssdErr='';
 async function loadSSD(){
   if(ssd)return true;if(ssdTried)return false;ssdTried=true;
-  for(const b of['https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12','https://unpkg.com/@vladmandic/face-api@1.7.12']){
+  const src=[['https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js','https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights'],
+             ['https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js','https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model']];
+  for(const[js,models]of src){
     try{
-      if(!window.faceapi)await new Promise((ok,no)=>{const s=document.createElement('script');s.src=b+'/dist/face-api.js';s.onload=ok;s.onerror=()=>{s.remove();no()};document.head.append(s)});
-      await faceapi.nets.ssdMobilenetv1.loadFromUri(b+'/model');ssd=faceapi;return true;
-    }catch(e){}
+      delete window.faceapi;
+      await new Promise((ok,no)=>{const s=document.createElement('script');s.src=js;s.onload=ok;s.onerror=()=>{s.remove();no(new Error('script'))};document.head.append(s)});
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(models);
+      ssd=faceapi;return true;
+    }catch(e){ssdErr=String(e&&e.message||e).slice(0,60)}
   }
   return false;
 }
+const faceEngine=()=>ssd?'strong detector + MediaPipe':'basic detector only'+(ssdErr?' ('+ssdErr+')':'');
 function faceWins(W,H,deep,hints){
   const out=[[0,0,W,H,'f']],seen=new Set(['0,0,'+W+','+H]);
   const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
@@ -247,7 +252,7 @@ function faceWins(W,H,deep,hints){
 function faceCluster(dets,W,H){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
   for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
-  const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.65,lo=ssd?.4:.5,out=[];
+  const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.55,lo=ssd?.4:.4,out=[];
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
@@ -303,8 +308,8 @@ async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();setBusy(true);pg.hidden=false;pg.value=0;
-  const back=v.currentTime,dur=v.duration,fstep=Math.max(.25,dur/80),ostep=Math.max(.5,dur/60);
-  const notes=[];let worker=null,ok=true;
+  const back=v.currentTime,dur=v.duration,fstep=Math.max(.4,dur/60),ostep=Math.max(1,dur/30),t00=performance.now();
+  const notes=[],maxGap=Math.max(1.25,fstep*3);let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
     let useFaces=wantFaces;
@@ -313,48 +318,53 @@ async function scanAll(){
     if(useText){st.textContent='Loading the text reader…';try{worker=await Tesseract.createWorker('eng')}catch(e){useText=false;notes.push('The text reader could not load, so text was not scanned.')}}
     if(!useFaces&&!useText){st.textContent=notes.join(' ');ok=false;return false}
     const k1=Math.min(1,1280/Math.max(v.videoWidth,v.videoHeight));fc.width=Math.round(v.videoWidth*k1);fc.height=Math.round(v.videoHeight*k1);
-    const k0=Math.min(1,2000/Math.max(v.videoWidth,v.videoHeight)),oc=document.createElement('canvas'),ox=oc.getContext('2d',{willReadFrequently:true});
-    oc.width=Math.round(v.videoWidth*k0);oc.height=Math.round(v.videoHeight*k0);
+    const k0=Math.min(1,1280/Math.max(v.videoWidth,v.videoHeight));
     const sm=document.createElement('canvas');sm.width=sm.height=24;const sx=sm.getContext('2d',{willReadFrequently:true});
     const times=[];for(let t=0;t<dur-.05;t+=fstep)times.push(t);if(!times.length)times.push(0);
-    let nextO=0,prevSig=null,prevHits=[],prevOT=-1;
+    let nextO=0,prevSig=null,prevJob=null;const jobs=[];
+    const ocrHits=data=>{const hits=[];
+      data.lines.forEach(L=>{
+        let s='';const map=[];
+        L.words.forEach(w=>{const txt=w.confidence<40?'#'.repeat(Math.max(1,w.text.length)):w.text;map.push([s.length,s.length+txt.length,w.bbox]);s+=txt+' '});
+        const taken=[];
+        ['card','phone','email','url'].filter(k=>texts.includes(k)).forEach(k=>{for(const m of s.matchAll(RX[k])){
+          const a=m.index,e=a+m[0].length;
+          if(!okHit(k,m[0])||taken.some(q=>q[0]<e&&q[1]>a))continue;
+          const bx=map.filter(q=>q[0]<e&&q[1]>a).map(q=>q[2]);if(!bx.length)continue;
+          taken.push([a,e]);const p=4,x0=Math.min(...bx.map(o=>o.x0))-p,y0=Math.min(...bx.map(o=>o.y0))-p;
+          hits.push({k,x:x0/k0,y:y0/k0,w:(Math.max(...bx.map(o=>o.x1))+p-x0)/k0,h:(Math.max(...bx.map(o=>o.y1))+p-y0)/k0});
+        }});
+      });return hits};
     for(let i=0;i<times.length;i++){
       const t=times[i];pg.value=i/times.length;
-      st.textContent='Scanning the video… '+Math.round(i/times.length*100)+'%';
+      const el=(performance.now()-t00)/1000,eta=i>3?Math.round(el/i*(times.length-i)):0;
+      st.textContent='Scanning the video… '+Math.round(i/times.length*100)+'%'+(eta?' · about '+(eta>90?Math.round(eta/60)+' min':eta+' s')+' left':'');
       await seekTo(t);
-      if(useFaces){fcx.drawImage(v,0,0,fc.width,fc.height);const hints=ftracks.filter(q=>t-q.lastT<=1.25).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});addSample(ftracks,t,await runFaces(fc,!ssd||i%3===0,hints),k1)}
-      if(useText&&t>=nextO-1e-6){
+      if(useFaces){fcx.drawImage(v,0,0,fc.width,fc.height);const hints=ftracks.filter(q=>t-q.lastT<=maxGap).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});addSample(ftracks,t,await runFaces(fc,!ssd||i%4===0,hints),k1)}
+      if(useText&&t>=nextO-1e-6){      // text reading runs in its own worker while the next frames are searched for faces
         nextO=t+ostep;
         sx.drawImage(v,0,0,24,24);const px=sx.getImageData(0,0,24,24).data,sig=[];let mean=0;
         for(let j=0;j<px.length;j+=4){const g=(px[j]+px[j+1]+px[j+2])/3;sig.push(g);mean+=g}mean/=576;
-        let hits;
-        if(prevSig&&sig.reduce((q,g,j)=>q+Math.abs(g-prevSig[j]),0)/576<3)hits=prevHits;
+        if(prevSig&&prevJob&&sig.reduce((q,g,j)=>q+Math.abs(g-prevSig[j]),0)/576<3){jobs.push({t,p:prevJob})}
         else{
-          ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);
-          const{data}=await worker.recognize(oc);hits=[];
-          data.lines.forEach(L=>{
-            let s='';const map=[];
-            L.words.forEach(w=>{const txt=w.confidence<40?'#'.repeat(Math.max(1,w.text.length)):w.text;map.push([s.length,s.length+txt.length,w.bbox]);s+=txt+' '});
-            const taken=[];
-            ['card','phone','email','url'].filter(k=>texts.includes(k)).forEach(k=>{for(const m of s.matchAll(RX[k])){
-              const a=m.index,e=a+m[0].length;
-              if(!okHit(k,m[0])||taken.some(q=>q[0]<e&&q[1]>a))continue;
-              const bx=map.filter(q=>q[0]<e&&q[1]>a).map(q=>q[2]);if(!bx.length)continue;
-              taken.push([a,e]);const p=4,x0=Math.min(...bx.map(o=>o.x0))-p,y0=Math.min(...bx.map(o=>o.y0))-p;
-              hits.push({k,x:x0/k0,y:y0/k0,w:(Math.max(...bx.map(o=>o.x1))+p-x0)/k0,h:(Math.max(...bx.map(o=>o.y1))+p-y0)/k0});
-            }});
-          });
+          if(jobs.length>=3)await jobs[jobs.length-3].p;
+          const oc=document.createElement('canvas');oc.width=Math.round(v.videoWidth*k0);oc.height=Math.round(v.videoHeight*k0);
+          const ox=oc.getContext('2d',{willReadFrequently:true});ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);
+          prevJob=worker.recognize(oc).then(r=>ocrHits(r.data));jobs.push({t,p:prevJob});
         }
-        prevSig=sig;prevHits=hits;
-        const ta=Math.max(0,t-ostep/2-.15),tb=t+ostep/2+.15;
-        hits.forEach(h=>{
-          const tr=tt.find(q=>q.k===h.k&&q.lastO===prevOT&&iou(q,h)>.5);
-          if(tr){const x1=Math.min(tr.x,h.x),y1=Math.min(tr.y,h.y),x2=Math.max(tr.x+tr.w,h.x+h.w),y2=Math.max(tr.y+tr.h,h.y+h.h);
-            Object.assign(tr,{x:x1,y:y1,w:x2-x1,h:y2-y1,lastO:t,t1:tb,n:tr.n+1})}
-          else tt.push({...h,lastO:t,t0:ta,t1:tb,n:1});
-        });
-        prevOT=t;
+        prevSig=sig;
       }
+    }
+    let prevOT=-1,prevP=null;
+    for(const j of jobs){
+      const hits=await j.p,t=j.t,ta=Math.max(0,t-ostep/2-.15),tb=t+ostep/2+.15;
+      hits.forEach(h=>{
+        const tr=tt.find(q=>q.k===h.k&&q.lastO===prevOT&&iou(q,h)>.5);
+        if(tr){const x1=Math.min(tr.x,h.x),y1=Math.min(tr.y,h.y),x2=Math.max(tr.x+tr.w,h.x+h.w),y2=Math.max(tr.y+tr.h,h.y+h.h);
+          Object.assign(tr,{x:x1,y:y1,w:x2-x1,h:y2-y1,lastO:t,t1:tb,n:tr.n+1})}
+        else tt.push({...h,lastO:t,t0:ta,t1:tb,n:1});
+      });
+      prevOT=t;
     }
     // faces -> regions
     const smooth=kf=>kf.map((b,i)=>{const n=[kf[Math.max(0,i-1)],b,kf[Math.min(kf.length-1,i+1)]],m=k=>(n[0][k]+n[1][k]+n[2][k])/3;return{t:b.t,x:m('x'),y:m('y'),w:m('w'),h:m('h')}});
@@ -365,7 +375,7 @@ async function scanAll(){
     regions=regions.filter(r=>r.k==='area').concat(faceR,textR);
     scanned=true;emptyOk=false;
     const n=faceR.length+textR.length;
-    st.textContent=(n?'Found '+n+' item(s) ('+faceR.length+' face'+(faceR.length==1?'':'s')+'). Each is hidden only while it is on screen. Untick any you want to keep.':'Nothing found. Try ticking more types, or draw over the area yourself.')+(notes.length?' '+notes.join(' '):'');
+    st.textContent=(n?'Found '+n+' item(s) ('+faceR.length+' face'+(faceR.length==1?'':'s')+'). Each is hidden only while it is on screen. Untick any you want to keep.':'Nothing found. Try ticking more types, or draw over the area yourself.')+(notes.length?' '+notes.join(' '):'')+(useFaces?' [Face finder: '+faceEngine()+'. Took '+Math.round((performance.now()-t00)/1000)+' s]':'');
     return true;
   }catch(e){st.textContent='Scan failed. Check your connection and try again.';return false}
   finally{

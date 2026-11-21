@@ -319,17 +319,22 @@ const contain=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math
 const mpDet=()=>faceDet;
 // ---- face finding: SSD-MobileNet (face-api) for recall, MediaPipe BlazeFace as a second opinion.
 // A face is kept only when it is confident or seen more than once, so objects and textures are not boxed.
-let ssd=null,ssdTried=false;
+let ssd=null,ssdTried=false,ssdErr='';
 async function loadSSD(){
   if(ssd)return true;if(ssdTried)return false;ssdTried=true;
-  for(const b of['https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12','https://unpkg.com/@vladmandic/face-api@1.7.12']){
+  const src=[['https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js','https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights'],
+             ['https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/dist/face-api.js','https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model']];
+  for(const[js,models]of src){
     try{
-      if(!window.faceapi)await new Promise((ok,no)=>{const s=document.createElement('script');s.src=b+'/dist/face-api.js';s.onload=ok;s.onerror=()=>{s.remove();no()};document.head.append(s)});
-      await faceapi.nets.ssdMobilenetv1.loadFromUri(b+'/model');ssd=faceapi;return true;
-    }catch(e){}
+      delete window.faceapi;
+      await new Promise((ok,no)=>{const s=document.createElement('script');s.src=js;s.onload=ok;s.onerror=()=>{s.remove();no(new Error('script'))};document.head.append(s)});
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(models);
+      ssd=faceapi;return true;
+    }catch(e){ssdErr=String(e&&e.message||e).slice(0,60)}
   }
   return false;
 }
+const faceEngine=()=>ssd?'strong detector + MediaPipe':'basic detector only'+(ssdErr?' ('+ssdErr+')':'');
 function faceWins(W,H,deep,hints){
   const out=[[0,0,W,H,'f']],seen=new Set(['0,0,'+W+','+H]);
   const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
@@ -340,7 +345,7 @@ function faceWins(W,H,deep,hints){
 function faceCluster(dets,W,H){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
   for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
-  const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.65,lo=ssd?.4:.5,out=[];
+  const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.55,lo=ssd?.4:.4,out=[];
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
@@ -401,7 +406,7 @@ $('#scan').onclick=async()=>{
           regions.push({x:b.originX-p,y:b.originY-p,w:b.width+2*p,h:b.height+2*p,label:'face',on:true})});
       }catch(e){msg=' Face model could not load. Check your connection or draw over faces by hand.'}
     }
-    st.textContent=`Found ${regions.filter(r=>r.label!=='Manual').length} item(s).${msg} Uncheck any you want to keep.`;
+    st.textContent=`Found ${regions.filter(r=>r.label!=='Manual').length} item(s).${msg} Uncheck any you want to keep.`+(on.includes('face')?' [Face finder: '+faceEngine()+']':'');
   }catch(err){
     st.textContent='Scan failed. Check your connection and try again. You can still draw areas by hand.';
   }
