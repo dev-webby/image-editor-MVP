@@ -211,54 +211,61 @@ const setBusy=b=>{busy=b;['scan','go','play','new','clear'].forEach(i=>$('#'+i).
 
 // ---- face detection (tiles + several sizes, so small and far-away faces are found) ----
 async function initFaces(){
-  if(fd)return true;
-  try{
+  const mp=(async()=>{if(fd)return true;
     const M='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14',{FaceDetector,FilesetResolver}=await import(M+'/vision_bundle.mjs');
-    fd=await FaceDetector.createFromOptions(await FilesetResolver.forVisionTasks(M+'/wasm'),{runningMode:'IMAGE',minDetectionConfidence:.3,
+    fd=await FaceDetector.createFromOptions(await FilesetResolver.forVisionTasks(M+'/wasm'),{runningMode:'IMAGE',minDetectionConfidence:.45,
       baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'}});
-    return true;
-  }catch(e){return false}
+    return true})().catch(()=>false);
+  const[a,b]=await Promise.all([loadSSD(),mp]);return a||b;
 }
 const fc=document.createElement('canvas'),fcx=fc.getContext('2d',{willReadFrequently:true}),tile=document.createElement('canvas');
 const iou=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
   if(w<=0||h<=0)return 0;const i=w*h;return i/(a.w*a.h+b.w*b.h-i)};
 const contain=(a,b)=>{const w=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x),h=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
   return w>0&&h>0?w*h/Math.min(a.w*a.h,b.w*b.h):0};
-// ---- multi-scale face finding. BlazeFace sees only 128x128 pixels at a time, so we slide windows of several sizes
-// over the picture (small windows find small or distant faces) and keep a face only when it is confident or seen more than once.
-function faceWins(W,H,dense,hints){
-  const L=Math.max(W,H),out=[[0,0,W,H]],seen=new Set(['0,0,'+W+','+H]);
-  const add=(x,y,w,h)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));const k=x+','+y+','+w+','+h;if(!seen.has(k)){seen.add(k);out.push([x,y,w,h])}};
-  for(const f of dense?[.5,.3,.2,.14]:[.5,.3]){
-    const s=Math.round(L*f);if(s<90)continue;const w=Math.min(s,W),h=Math.min(s,H),st=Math.max(1,s/2);
-    for(let y=0;;y+=st){for(let x=0;;x+=st){add(x,y,w,h);if(x+w>=W)break}if(y+h>=H)break}
+const mpDet=()=>fd;
+// ---- face finding: SSD-MobileNet (face-api) for recall, MediaPipe BlazeFace as a second opinion.
+// A face is kept only when it is confident or seen more than once, so objects and textures are not boxed.
+let ssd=null,ssdTried=false;
+async function loadSSD(){
+  if(ssd)return true;if(ssdTried)return false;ssdTried=true;
+  for(const b of['https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12','https://unpkg.com/@vladmandic/face-api@1.7.12']){
+    try{
+      if(!window.faceapi)await new Promise((ok,no)=>{const s=document.createElement('script');s.src=b+'/dist/face-api.js';s.onload=ok;s.onerror=()=>{s.remove();no()};document.head.append(s)});
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(b+'/model');ssd=faceapi;return true;
+    }catch(e){}
   }
-  (hints||[]).forEach(b=>{const s=Math.max(96,Math.max(b.w,b.h)*3),cx=b.x+b.w/2,cy=b.y+b.h/2;add(cx-s/2,cy-s/2,Math.min(s,W),Math.min(s,H))});
+  return false;
+}
+function faceWins(W,H,deep,hints){
+  const out=[[0,0,W,H,'f']],seen=new Set(['0,0,'+W+','+H]);
+  const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
+  if(deep&&Math.max(W,H)>=500)for(let i=0;i<2;i++)for(let j=0;j<2;j++)add(i*.4*W,j*.4*H,.6*W,.6*H,'t');
+  (hints||[]).forEach(b=>{const s=Math.max(120,Math.max(b.w,b.h)*3.5);add(b.x+b.w/2-s/2,b.y+b.h/2-s/2,Math.min(s,W),Math.min(s,H),'h')});
   return out;
 }
 function faceCluster(dets,W,H){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
-  for(const d of dets){
-    const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);
-    if(c){c.m.push(d)}else cl.push({top:d,m:[d]});
-  }
-  const minS=Math.max(10,Math.min(W,H)*.015),out=[];
+  for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
+  const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.65,lo=ssd?.4:.5,out=[];
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
     if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H)continue;
-    if(b.score>=.75||(c.m.length>=2&&b.score>=.45)||c.m.length>=3)out.push(b);
+    if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
   return out;
 }
 const _tile=document.createElement('canvas');
-function runFaces(det,src,dense,hints){      // src: canvas holding the picture; det(canvas) -> MediaPipe detections
-  const W=src.width,H=src.height,dets=[];
-  for(const[x,y,w,h]of faceWins(W,H,dense,hints)){
+async function runFaces(src,deep,hints){      // src: canvas holding the picture
+  const W=src.width,H=src.height,dets=[],mp=mpDet();
+  for(const[x,y,w,h,kind]of faceWins(W,H,deep,hints)){
     let s=src,ox=0,oy=0;
     if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
-    let r;try{r=det(s)}catch(e){continue}
-    for(const d of r.detections){const b=d.boundingBox;dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}
+    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:.5,maxResults:40})))
+      dets.push({x:d.box.x+ox,y:d.box.y+oy,w:d.box.width,h:d.box.height,score:d.score})}catch(e){}}
+    if(mp&&(!ssd||kind!=='t')){try{for(const d of mp.detect(s).detections){const b=d.boundingBox;
+      dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}}catch(e){}}
   }
   return faceCluster(dets,W,H);
 }
@@ -296,7 +303,7 @@ async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();setBusy(true);pg.hidden=false;pg.value=0;
-  const back=v.currentTime,dur=v.duration,fstep=Math.max(.12,dur/200),ostep=Math.max(.5,dur/60);
+  const back=v.currentTime,dur=v.duration,fstep=Math.max(.25,dur/80),ostep=Math.max(.5,dur/60);
   const notes=[];let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
@@ -315,7 +322,7 @@ async function scanAll(){
       const t=times[i];pg.value=i/times.length;
       st.textContent='Scanning the video… '+Math.round(i/times.length*100)+'%';
       await seekTo(t);
-      if(useFaces){fcx.drawImage(v,0,0,fc.width,fc.height);const hints=ftracks.filter(q=>t-q.lastT<=1.25).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});addSample(ftracks,t,runFaces(c=>fd.detect(c),fc,i%4===0,hints),k1)}
+      if(useFaces){fcx.drawImage(v,0,0,fc.width,fc.height);const hints=ftracks.filter(q=>t-q.lastT<=1.25).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});addSample(ftracks,t,await runFaces(fc,!ssd||i%3===0,hints),k1)}
       if(useText&&t>=nextO-1e-6){
         nextO=t+ostep;
         sx.drawImage(v,0,0,24,24);const px=sx.getImageData(0,0,24,24).data,sig=[];let mean=0;
