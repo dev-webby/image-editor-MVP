@@ -92,7 +92,7 @@ dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
 <p id="paidmsg" class="card" hidden>Thank you! Your purchase is being processed. Your credits or plan will show at the top right in a few seconds.</p>
 <div class="tabs"><a class="on" href="index.html">Images</a><a href="video.html">Video <span class="new">New</span></a></div>
 <label id="drop" for="file">Choose a screenshot, drop it here, or paste it<small>PNG, JPG or WebP. No account needed.</small></label>
-<input id="file" type="file" accept="image/*" hidden>
+<input id="file" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.avif,.heic,.heif" hidden>
 <section id="editor" hidden>
  <div class="card" id="stage"><canvas id="cv"></canvas></div>
  <p class="sub" style="margin:0 0 8px">Drag on the image to hide an area.</p>
@@ -193,18 +193,57 @@ const mode=()=>document.querySelector('[name=m]:checked').value;
 const strength=()=>+$('#str').value;
 
 function fail(m){if(!$('#drop').hidden)$('#drop small').textContent=m;else dst(m)}
-function load(f){
+const uid=()=>crypto.randomUUID?crypto.randomUUID():'r'+Date.now()+Math.random().toString(36).slice(2);
+// Identify the real file type from its first bytes (phones and some apps give no type or the wrong one)
+async function sniff(f){
+  const b=new Uint8Array(await f.slice(0,32).arrayBuffer()),t=(o,n)=>String.fromCharCode(...b.slice(o,o+n));
+  if(b[0]===255&&b[1]===216)return'image/jpeg';
+  if(b[0]===137&&t(1,3)==='PNG')return'image/png';
+  if(t(0,3)==='GIF')return'image/gif';
+  if(t(0,4)==='RIFF'&&t(8,4)==='WEBP')return'image/webp';
+  if(t(0,2)==='BM')return'image/bmp';
+  if(t(4,4)==='ftyp'){const br=t(8,4);return/^(avif|avis)$/.test(br)?'image/avif':/^(heic|heix|hevc|hevx|heim|heis|mif1|msf1)$/.test(br)?'image/heic':''}
+  return'';
+}
+const tryImg=blob=>new Promise((ok,no)=>{const i=new Image(),u=URL.createObjectURL(blob);
+  i.onload=async()=>{try{if(i.decode)await i.decode()}catch(e){}URL.revokeObjectURL(u);ok(i)};i.onerror=()=>{URL.revokeObjectURL(u);no(new Error('img'))};i.src=u});
+let heicLib=null;
+function loadHeic(){return heicLib||(heicLib=new Promise((ok,no)=>{const s=document.createElement('script');
+  s.src='https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';s.onload=()=>ok(window.heic2any);s.onerror=()=>{heicLib=null;no(new Error('heic lib'))};document.head.append(s)}))}
+async function decode(f){
+  const kind=await sniff(f),name=/\.(heic|heif)$/i.test(f.name);
+  const mime=kind||(f.type&&f.type.startsWith('image/')?f.type:'');
+  const blob=mime&&f.type!==mime?new Blob([f],{type:mime}):f;
+  try{return await tryImg(blob)}catch(e){}
+  try{return await createImageBitmap(blob,{imageOrientation:'from-image'})}catch(e){}
+  if(kind==='image/heic'||name||/heic|heif/i.test(f.type)){
+    const h=await loadHeic(),out=await h({blob:f,toType:'image/jpeg',quality:.92});
+    return tryImg(Array.isArray(out)?out[0]:out);
+  }
+  throw new Error('decode');
+}
+async function load(f){
   if(!f)return;
-  if(!(f.type.startsWith('image/')||/\.(jpe?g|png|webp|gif|bmp|avif)$/i.test(f.name))){fail('That file is not an image.');return}
-  const i=new Image();
-  i.onerror=()=>fail('This image could not be opened. Save it as a PNG or JPG and try again.');
-  i.onload=()=>{img=i;cv.width=i.naturalWidth;cv.height=i.naturalHeight;regions=[];hist=[];
-    $('#drop').hidden=true;$('#editor').hidden=false;list();draw();URL.revokeObjectURL(i.src)};
-  i.src=URL.createObjectURL(f);
+  fail('Opening image…');
+  try{
+    const src=await decode(f),W=src.naturalWidth||src.width,H=src.naturalHeight||src.height;
+    if(!W||!H)throw new Error('size');
+    // phones can make huge photos; browsers (iPhone especially) fail above ~16 million pixels, so scale down
+    const k=Math.min(1,Math.sqrt(16e6/(W*H))),c=document.createElement('canvas');
+    c.width=Math.max(1,Math.round(W*k));c.height=Math.max(1,Math.round(H*k));
+    c.getContext('2d').drawImage(src,0,0,c.width,c.height);
+    c.naturalWidth=c.width;c.naturalHeight=c.height;if(src.close)src.close();
+    img=c;cv.width=c.width;cv.height=c.height;regions=[];hist=[];
+    $('#drop').hidden=true;$('#editor').hidden=false;list();draw();dst('');
+  }catch(e){
+    const hz=/\.(heic|heif)$/i.test(f.name)||/heic|heif/i.test(f.type);
+    fail(hz?'This iPhone photo (HEIC) could not be converted. Check your connection, or share it from Photos as JPG, and try again.'
+      :'This image could not be opened ('+(f.type||'unknown type')+', '+(f.size/1048576).toFixed(1)+' MB). Try saving it as a JPG or PNG.');
+  }
 }
 $('#file').onchange=e=>{load(e.target.files[0]);e.target.value=''};
 $('#new').onclick=()=>$('#file').click();
-document.onpaste=e=>load([...e.clipboardData.files][0]);
+document.onpaste=e=>{const f=e.clipboardData&&[...e.clipboardData.files][0];if(f)load(f)};
 const dz=$('#drop');
 dz.ondragover=e=>{e.preventDefault();dz.classList.add('over')};
 dz.ondragleave=()=>dz.classList.remove('over');
@@ -214,17 +253,21 @@ function fx(r,s){
   const{x,y,w,h}=r;
   if(mode()==='bar'){ctx.fillStyle='#000';ctx.fillRect(x,y,w,h);return}
   ctx.save();ctx.beginPath();ctx.rect(x,y,w,h);ctx.clip();
-  if(mode()==='blur'){ctx.filter=`blur(${strength()*s}px)`;ctx.drawImage(img,0,0)}
+  if(mode()==='blur'){                          // down/up scaling: works in Safari, which ignores ctx.filter
+    const f=Math.max(3,strength()*s*.8),t1=document.createElement('canvas'),t2=document.createElement('canvas');
+    t1.width=Math.max(2,Math.ceil(w/f));t1.height=Math.max(2,Math.ceil(h/f));t2.width=Math.max(2,Math.ceil(t1.width/2));t2.height=Math.max(2,Math.ceil(t1.height/2));
+    t1.getContext('2d').drawImage(img,x,y,w,h,0,0,t1.width,t1.height);t2.getContext('2d').drawImage(t1,0,0,t2.width,t2.height);
+    t1.getContext('2d').drawImage(t2,0,0,t1.width,t1.height);ctx.imageSmoothingEnabled=true;ctx.drawImage(t1,x,y,w,h)}
   else{
     const b=Math.max(2,strength()*s*1.5),t=document.createElement('canvas');
     t.width=Math.max(1,Math.ceil(w/b));t.height=Math.max(1,Math.ceil(h/b));
     t.getContext('2d').drawImage(img,x,y,w,h,0,0,t.width,t.height);
-    ctx.imageSmoothingEnabled=false;ctx.drawImage(t,x,y,w,h);
+    ctx.imageSmoothingEnabled=false;ctx.drawImage(t,x,y,w,h);ctx.imageSmoothingEnabled=true;
   }
   ctx.restore();
 }
 function draw(preview=true){
-  ctx.filter='none';ctx.drawImage(img,0,0);
+  ctx.drawImage(img,0,0);
   const s=Math.max(cv.width,cv.height)/400;
   regions.filter(r=>r.on).forEach(r=>fx(r,s));
   if(preview&&drag){ctx.strokeStyle='#ffd400';ctx.lineWidth=2*s;ctx.strokeRect(...drag)}
@@ -260,7 +303,9 @@ function ocrSource(){
   tx.drawImage(img,0,0,16,16);const d=tx.getImageData(0,0,16,16).data;let sum=0;
   for(let i=0;i<d.length;i+=4)sum+=d[i]+d[i+1]+d[i+2];
   const c=document.createElement('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;
-  const x=c.getContext('2d');if(sum/768<110)x.filter='invert(1)';x.drawImage(img,0,0);return c;
+  const x=c.getContext('2d');x.drawImage(img,0,0);
+  if(sum/768<110){const q=x.getImageData(0,0,c.width,c.height),p=q.data;for(let i=0;i<p.length;i+=4){p[i]=255-p[i];p[i+1]=255-p[i+1];p[i+2]=255-p[i+2]}x.putImageData(q,0,0)}
+  return c;
 }
 function add(boxes,label){
   const p=4,x0=Math.min(...boxes.map(b=>b.x0))-p,y0=Math.min(...boxes.map(b=>b.y0))-p,
@@ -276,7 +321,17 @@ async function findFaces(){
     faceDet=await FaceDetector.createFromOptions(fs,{runningMode:'IMAGE',minDetectionConfidence:.4,
       baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'}});
   }
-  return faceDet.detect(img).detections.map(d=>d.boundingBox);
+  const W=img.width,H=img.height,out=[],t=document.createElement('canvas');
+  const run=(sx,sy,sw,sh)=>{let src=img;if(sw<W||sh<H){t.width=Math.round(sw);t.height=Math.round(sh);t.getContext('2d').drawImage(img,sx,sy,sw,sh,0,0,t.width,t.height);src=t}
+    for(const d of faceDet.detect(src).detections){const b=d.boundingBox;out.push({originX:b.originX+(src===img?0:sx),originY:b.originY+(src===img?0:sy),width:b.width,height:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}};
+  run(0,0,W,H);                                  // whole picture, then overlapping tiles so small faces are found too
+  if(Math.max(W,H)>=640)for(let i=0;i<2;i++)for(let j=0;j<2;j++)run(i*.4*W,j*.4*H,.6*W,.6*H);
+  if(Math.max(W,H)>=1200)for(let i=0;i<3;i++)for(let j=0;j<3;j++)run(i*.3*W,j*.3*H,.4*W,.4*H);
+  const ov=(a,b)=>{const w=Math.min(a.originX+a.width,b.originX+b.width)-Math.max(a.originX,b.originX),h=Math.min(a.originY+a.height,b.originY+b.height)-Math.max(a.originY,b.originY);
+    return w>0&&h>0?w*h/Math.min(a.width*a.height,b.width*b.height):0};
+  const good=out.filter(b=>{const r=b.width/b.height;return r>.55&&r<1.8&&b.width*b.height<.45*W*H&&b.width>=Math.max(12,Math.min(W,H)*.015)}).sort((a,b)=>b.score-a.score),keep=[];
+  for(const b of good)if(!keep.some(k=>ov(k,b)>.5))keep.push(b);
+  return keep;
 }
 $('#scan').onclick=async()=>{
   const st=$('#st'),on=[...document.querySelectorAll('.cat:checked')].map(c=>c.value);
@@ -381,7 +436,7 @@ async function onDownload(full){
   if(!sb){exportImage(true);return}                          // accounts not configured yet
   if(!user){dst('Sign in to download at full quality.');openAuth('in');return}
   dst('Checking your account…');
-  const r=await sb.rpc('export_full_image',{p_ref:crypto.randomUUID()});
+  const r=await sb.rpc('export_full_image',{p_ref:uid()});
   if(r.error){dst('Something went wrong. Please try again.');return}
   if(!r.data){dst('You have no credits left. Buy credits or subscribe for full quality.');location.hash='pricing';return}
   exportImage(true);dst('Downloaded.');refresh();
