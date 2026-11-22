@@ -339,6 +339,7 @@ function faceWins(W,H,deep,hints,only){
   const out=only?[]:[[0,0,W,H,'f']],seen=new Set(only?[]:['0,0,'+W+','+H]);
   const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
   if(deep&&Math.max(W,H)>=500)for(let i=0;i<2;i++)for(let j=0;j<2;j++)add(i*.4*W,j*.4*H,.6*W,.6*H,'t');
+  if(deep===2&&Math.max(W,H)>=700)for(let i=0;i<3;i++)for(let j=0;j<3;j++)add(i*.3*W,j*.3*H,.4*W,.4*H,'t');
   (hints||[]).forEach(b=>{const s=Math.max(120,Math.max(b.w,b.h)*3.5);add(b.x+b.w/2-s/2,b.y+b.h/2-s/2,Math.min(s,W),Math.min(s,H),'h')});
   return out;
 }
@@ -349,7 +350,7 @@ function faceCluster(dets,W,H,loose){
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
-    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H||(b.w*b.h>.15*W*H&&b.score<.8))continue;
+    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.7*W*H||(b.w*b.h>.4*W*H&&b.score<.8))continue;
     if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
@@ -380,7 +381,7 @@ async function findFaces(){
   if(!ssd&&!faceDet)throw new Error('no face model');
   const k=Math.min(1,1600/Math.max(img.width,img.height)),ac=document.createElement('canvas');
   ac.width=Math.round(img.width*k);ac.height=Math.round(img.height*k);ac.getContext('2d').drawImage(img,0,0,ac.width,ac.height);
-  return(await runFaces(ac,true)).map(b=>({originX:b.x/k,originY:b.y/k,width:b.w/k,height:b.h/k}));
+  return(await runFaces(ac,2)).map(b=>({originX:b.x/k,originY:b.y/k,width:b.w/k,height:b.h/k}));
 }
 $('#scan').onclick=async()=>{
   const st=$('#st'),on=[...document.querySelectorAll('.cat:checked')].map(c=>c.value);

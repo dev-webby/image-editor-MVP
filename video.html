@@ -92,7 +92,7 @@ footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:
 <script>
 const $=s=>document.querySelector(s),cv=$('#cv'),ctx=cv.getContext('2d'),tc=document.createElement('canvas'),tc2=document.createElement('canvas');
 const v=document.createElement('video');v.playsInline=true;v.setAttribute('playsinline','');v.preload='auto';
-let regions=[],drag=null,K=1,fd=null,rec=false,busy=false,aud=null,user=null,scanned=false,emptyOk=false,curMR=null,dlUrl=null;
+let reloading=false,vErr=false,regions=[],drag=null,K=1,fd=null,rec=false,busy=false,aud=null,user=null,scanned=false,emptyOk=false,curMR=null,dlUrl=null;
 const FREE_SECS=15,FREE_H=480,MAX_SECS=180;
 const RX={email:/[\w.+-]+@[\w-]+\.[\w.-]+/g,phone:/\+?\d[\d\s().-]{7,}\d/g,card:/\b(?:\d[ -]?){13,19}\b/g,url:/(?:https?:\/\/|www\.)\S+/gi};
 const CFG=window.APP_CONFIG||{};
@@ -119,11 +119,11 @@ function openVideo(file){
   v.pause();scanned=false;emptyOk=false;$('#dl').hidden=true;
   v.src=URL.createObjectURL(file);
   v.onloadedmetadata=()=>{if(v.duration===Infinity){v.currentTime=1e7;v.addEventListener('timeupdate',()=>{v.currentTime=0},{once:true})}};
-  v.onloadeddata=()=>{cv.width=v.videoWidth;cv.height=v.videoHeight;regions=[];K=1;list();
+  v.onloadeddata=()=>{if(reloading)return;cv.width=v.videoWidth;cv.height=v.videoHeight;regions=[];K=1;list();
     $('#drop').hidden=true;$('#editor').hidden=false;$('#st').textContent='';
     dst(v.duration>MAX_SECS?'This video is longer than 3 minutes. Trim it first, then try again.':'Free clips (up to 15 seconds) export at 480p. Full quality uses 3 credits per 30 seconds.');
     frame();tm()};
-  v.onerror=()=>{const c=v.error?v.error.code:0,m=c===4?'This browser cannot play this video format (often HEVC/H.265). Save or share it as a standard MP4 (H.264) and try again.':c===3?'This video file looks damaged or cut off. Try another copy of it.':'This video could not be opened here. Try Chrome or Safari, or save it as MP4 first.';
+  v.onerror=()=>{if(busy){vErr=true;return}const c=v.error?v.error.code:0,m=c===4?'This browser cannot play this video format (often HEVC/H.265). Save or share it as a standard MP4 (H.264) and try again.':c===3?'This video file looks damaged or cut off. Try another copy of it.':'This video could not be opened here. Try Chrome or Safari, or save it as MP4 first.';
     if($('#editor').hidden){$('#drop').hidden=false;$('#drop small').textContent=m}else dst(m)};
 }
 
@@ -247,6 +247,7 @@ function faceWins(W,H,deep,hints,only){
   const out=only?[]:[[0,0,W,H,'f']],seen=new Set(only?[]:['0,0,'+W+','+H]);
   const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
   if(deep&&Math.max(W,H)>=500)for(let i=0;i<2;i++)for(let j=0;j<2;j++)add(i*.4*W,j*.4*H,.6*W,.6*H,'t');
+  if(deep===2&&Math.max(W,H)>=700)for(let i=0;i<3;i++)for(let j=0;j<3;j++)add(i*.3*W,j*.3*H,.4*W,.4*H,'t');
   (hints||[]).forEach(b=>{const s=Math.max(120,Math.max(b.w,b.h)*3.5);add(b.x+b.w/2-s/2,b.y+b.h/2-s/2,Math.min(s,W),Math.min(s,H),'h')});
   return out;
 }
@@ -257,7 +258,7 @@ function faceCluster(dets,W,H,loose){
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
-    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H||(b.w*b.h>.15*W*H&&b.score<.8))continue;
+    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.7*W*H||(b.w*b.h>.4*W*H&&b.score<.8))continue;
     if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
@@ -278,12 +279,12 @@ async function runFaces(src,deep,hints,loose,only){      // src: canvas holding 
 }
 
 // Links detections from sample to sample so each person becomes one "Face" with a path through the video
-let MAXGAP=2;
+let MAXGAP=4;
 function addSample(tracks,t,boxes,k1){
   const open=tracks.filter(q=>t-q.lastT<=MAXGAP),cand=[];
   boxes.forEach((b,bi)=>open.forEach((q,qi)=>{
     const l=q.kf[q.kf.length-1],gap=t-l.t,d=Math.hypot(b.x+b.w/2-l.x-l.w/2,b.y+b.h/2-l.y-l.h/2);
-    if(d<Math.max(b.w,l.w)*(1+gap*1.5))cand.push({d,bi,qi})}));
+    if(d<Math.max(b.w,l.w)*(gap>2?.5:1+gap*1.5))cand.push({d,bi,qi})}));
   cand.sort((a,b)=>a.d-b.d);const ub=new Set(),uq=new Set();
   const thumb=(q,b)=>{const c=q.thumb||(q.thumb=document.createElement('canvas'));c.width=c.height=48;
     c.getContext('2d').drawImage(fc,Math.max(0,b.x),Math.max(0,b.y),b.w,b.h,0,0,48,48)};
@@ -307,12 +308,36 @@ function invert(c,x){const d=x.getImageData(0,0,c.width,c.height),p=d.data;for(l
 // ---- scan the whole clip ----
 const seekTo=t=>Math.abs(v.currentTime-t)<.005?Promise.resolve():new Promise(res=>{
   let done=false;const f=()=>{if(!done){done=true;res()}};v.addEventListener('seeked',f,{once:true});setTimeout(f,4000);v.currentTime=t}).then(()=>new Promise(r=>requestAnimationFrame(()=>r())));
+async function recover(t){           // phones sometimes drop the video decoder; reload the same file and carry on
+  const u=v.src;reloading=true;vErr=false;v.pause();v.removeAttribute('src');v.load();v.src=u;
+  await new Promise(r=>{let d=false;const f=()=>{if(!d){d=true;r()}};v.addEventListener('loadeddata',f,{once:true});setTimeout(f,8000)});
+  vErr=false;reloading=false;await seekTo(Math.min(t,Math.max(0,(v.duration||t)-.05)));
+}
+// Moves the picture forward to time t by playing (fast and gentle on phones), instead of jumping around with seeks
+async function advanceTo(t,tries=0){
+  try{
+    if(vErr||v.error)throw new Error('decoder');
+    if(!v.requestVideoFrameCallback||t<v.currentTime-.01||t-v.currentTime>2){await seekTo(t)}
+    else if(t-v.currentTime>.02){
+      v.playbackRate=1;await v.play();
+      await new Promise(res=>{let d=false;const fin=()=>{if(!d){d=true;res()}};
+        const f=(n,m)=>{if(d)return;if(m.mediaTime>=t-.02||v.ended)fin();else v.requestVideoFrameCallback(f)};
+        v.requestVideoFrameCallback(f);setTimeout(fin,4000+(t-v.currentTime)*1500)});
+      v.pause();
+    }
+    if(vErr||v.error)throw new Error('decoder');
+  }catch(e){
+    if(tries>=3)throw new Error('The video stopped responding.');
+    await recover(t);return advanceTo(t,tries+1);
+  }
+  await new Promise(r=>requestAnimationFrame(()=>r()));
+}
 async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
-  v.pause();setBusy(true);pg.hidden=false;pg.value=0;
+  v.pause();v.muted=true;setBusy(true);pg.hidden=false;pg.value=0;
   const back=v.currentTime,dur=v.duration,fstep=Math.max(.3,dur/90),ostep=Math.max(1,dur/30),t00=performance.now();
-  const notes=[],maxGap=Math.max(2,fstep*5);MAXGAP=maxGap;let worker=null,ok=true;
+  const notes=[],maxGap=2;MAXGAP=4;let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
     let useFaces=wantFaces;
@@ -339,13 +364,13 @@ async function scanAll(){
         }});
       });return hits};
     for(let i=0;i<times.length;i++){
-      const t=times[i];pg.value=i/times.length;
+      const tg=times[i];pg.value=i/times.length;
       const el=(performance.now()-t00)/1000,eta=i>3?Math.round(el/i*(times.length-i)):0;
       st.textContent='Scanning the video… '+Math.round(i/times.length*100)+'%'+(eta?' · about '+(eta>90?Math.round(eta/60)+' min':eta+' s')+' left':'');
-      await seekTo(t);
+      await advanceTo(tg);const t=v.currentTime;
       if(useFaces){
         fcx.drawImage(v,0,0,fc.width,fc.height);
-        const found=await runFaces(fc,!ssd||i%4===0,null,true);addSample(ftracks,t,found,k1);
+        const found=await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true);addSample(ftracks,t,found,k1);
         // a face that was tracked but not found this time: look again closely around where it was
         const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
         if(miss.length){const more=(await runFaces(fc,false,miss,true,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
@@ -383,17 +408,17 @@ async function scanAll(){
       const kf=sm.map((b,j)=>{
         const nb=[sm[j-1],sm[j+1]].filter(Boolean),mv=Math.max(0,...nb.map(o=>Math.hypot(o.x+o.w/2-b.x-b.w/2,o.y+o.h/2-b.y-b.h/2)));
         const p=Math.max(b.w,b.h)*.35+mv*.6;return{t:b.t,x:b.x-p,y:b.y-p*1.2,w:b.w+2*p,h:b.h+2.4*p}});
-      return{k:'face',label:'Face '+(i+1),on:true,kf,pad:Math.max(.6,fstep*2),thumb:q.thumb}});
+      return{k:'face',label:'Face '+(i+1),on:true,kf,pad:Math.max(.9,fstep*3),thumb:q.thumb}});
     const textR=tt.filter(q=>q.n>=2||q.k==='email'||dur<=3).map(q=>({k:q.k,x:q.x,y:q.y,w:q.w,h:q.h,label:q.k,t0:q.t0,t1:Math.min(q.t1,dur),on:true}));
     regions=regions.filter(r=>r.k==='area').concat(faceR,textR);
     scanned=true;emptyOk=false;
     const n=faceR.length+textR.length;
     st.textContent=(n?'Found '+n+' item(s) ('+faceR.length+' face'+(faceR.length==1?'':'s')+'). Each is hidden only while it is on screen. Untick any you want to keep.':'Nothing found. Try ticking more types, or draw over the area yourself.')+(notes.length?' '+notes.join(' '):'')+(useFaces?' [Face finder: '+faceEngine()+'; '+ftracks.length+' candidates, '+faceR.length+' kept. Took '+Math.round((performance.now()-t00)/1000)+' s]':'');
     return true;
-  }catch(e){st.textContent='Scan failed. Check your connection and try again.';return false}
+  }catch(e){st.textContent=(e&&e.message==='The video stopped responding.')?'The phone stopped decoding this video. Tap the scan button again. If it keeps happening, close other tabs and apps first.':'Scan failed. Check your connection and try again.';return false}
   finally{
     if(worker)try{await worker.terminate()}catch(e){}
-    await seekTo(back);setBusy(false);pg.hidden=true;list();frame();tm();
+    v.muted=false;vErr=false;try{await seekTo(back)}catch(e){}setBusy(false);pg.hidden=true;list();frame();tm();
   }
 }
 $('#scan').onclick=()=>{scanAll()};
