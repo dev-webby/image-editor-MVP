@@ -335,14 +335,14 @@ async function loadSSD(){
   return false;
 }
 const faceEngine=()=>ssd?'strong detector + MediaPipe':'basic detector only'+(ssdErr?' ('+ssdErr+')':'');
-function faceWins(W,H,deep,hints){
-  const out=[[0,0,W,H,'f']],seen=new Set(['0,0,'+W+','+H]);
+function faceWins(W,H,deep,hints,only){
+  const out=only?[]:[[0,0,W,H,'f']],seen=new Set(only?[]:['0,0,'+W+','+H]);
   const add=(x,y,w,h,k)=>{x=Math.max(0,Math.min(W-w,Math.round(x)));y=Math.max(0,Math.min(H-h,Math.round(y)));w=Math.round(w);h=Math.round(h);const q=x+','+y+','+w+','+h;if(!seen.has(q)){seen.add(q);out.push([x,y,w,h,k])}};
   if(deep&&Math.max(W,H)>=500)for(let i=0;i<2;i++)for(let j=0;j<2;j++)add(i*.4*W,j*.4*H,.6*W,.6*H,'t');
   (hints||[]).forEach(b=>{const s=Math.max(120,Math.max(b.w,b.h)*3.5);add(b.x+b.w/2-s/2,b.y+b.h/2-s/2,Math.min(s,W),Math.min(s,H),'h')});
   return out;
 }
-function faceCluster(dets,W,H){
+function faceCluster(dets,W,H,loose){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
   for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
   const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.55,lo=ssd?.4:.4,out=[];
@@ -350,22 +350,23 @@ function faceCluster(dets,W,H){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
     if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H)continue;
-    if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
+    if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
+    else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
   return out;
 }
 const _tile=document.createElement('canvas');
-async function runFaces(src,deep,hints){      // src: canvas holding the picture
+async function runFaces(src,deep,hints,loose,only){      // src: canvas holding the picture
   const W=src.width,H=src.height,dets=[],mp=mpDet();
-  for(const[x,y,w,h,kind]of faceWins(W,H,deep,hints)){
+  for(const[x,y,w,h,kind]of faceWins(W,H,deep,hints,only)){
     let s=src,ox=0,oy=0;
     if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
-    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:.5,maxResults:40})))
-      dets.push({x:d.box.x+ox,y:d.box.y+oy,w:d.box.width,h:d.box.height,score:d.score})}catch(e){}}
+    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:loose?.35:.5,maxResults:40})))
+      dets.push({x:d.box.x+ox,y:d.box.y+oy,w:d.box.width,h:d.box.height,score:d.score,s:1})}catch(e){}}
     if(mp&&(!ssd||kind!=='t')){try{for(const d of mp.detect(s).detections){const b=d.boundingBox;
       dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}}catch(e){}}
   }
-  return faceCluster(dets,W,H);
+  return faceCluster(dets,W,H,loose);
 }
 
 let faceDet=null;
