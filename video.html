@@ -123,7 +123,8 @@ function openVideo(file){
     $('#drop').hidden=true;$('#editor').hidden=false;$('#st').textContent='';
     dst(v.duration>MAX_SECS?'This video is longer than 3 minutes. Trim it first, then try again.':'Free clips (up to 15 seconds) export at 480p. Full quality uses 3 credits per 30 seconds.');
     frame();tm()};
-  v.onerror=()=>{$('#drop').hidden=false;$('#drop small').textContent='This video could not be opened here. iPhone and Android videos usually work. If yours does not, try Chrome or Safari, or save it as MP4 first.'};
+  v.onerror=()=>{const c=v.error?v.error.code:0,m=c===4?'This browser cannot play this video format (often HEVC/H.265). Save or share it as a standard MP4 (H.264) and try again.':c===3?'This video file looks damaged or cut off. Try another copy of it.':'This video could not be opened here. Try Chrome or Safari, or save it as MP4 first.';
+    if($('#editor').hidden){$('#drop').hidden=false;$('#drop small').textContent=m}else dst(m)};
 }
 
 // ---- drawing ----
@@ -153,7 +154,7 @@ function fx(b){
     c1.drawImage(v,x,y,w,h,0,0,tc.width,tc.height);c2.drawImage(tc,0,0,tc2.width,tc2.height);c1.drawImage(tc2,0,0,tc.width,tc.height);
     ctx.imageSmoothingEnabled=true;ctx.drawImage(tc,x,y,w,h);
   }else{
-    const f=Math.max(3,str()*s*1.5);
+    const f=Math.max(3,Math.min(str()*s*1.5,Math.min(w,h)/5));
     tc.width=Math.max(1,Math.ceil(w/f));tc.height=Math.max(1,Math.ceil(h/f));
     tc.getContext('2d').drawImage(v,x,y,w,h,0,0,tc.width,tc.height);
     ctx.imageSmoothingEnabled=false;ctx.drawImage(tc,x,y,w,h);ctx.imageSmoothingEnabled=true;
@@ -251,12 +252,12 @@ function faceWins(W,H,deep,hints,only){
 }
 function faceCluster(dets,W,H,loose){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
-  for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
+  for(const d of dets){const c=cl.find(c=>{const r=(c.top.w*c.top.h)/(d.w*d.h);return iou(c.top,d)>.4||(contain(c.top,d)>.8&&r>.4&&r<2.5)});if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
   const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.55,lo=ssd?.4:.4,out=[];
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
-    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H)continue;
+    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H||(b.w*b.h>.15*W*H&&b.score<.8))continue;
     if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
@@ -277,18 +278,19 @@ async function runFaces(src,deep,hints,loose,only){      // src: canvas holding 
 }
 
 // Links detections from sample to sample so each person becomes one "Face" with a path through the video
+let MAXGAP=2;
 function addSample(tracks,t,boxes,k1){
-  const open=tracks.filter(q=>t-q.lastT<=1.25),cand=[];
+  const open=tracks.filter(q=>t-q.lastT<=MAXGAP),cand=[];
   boxes.forEach((b,bi)=>open.forEach((q,qi)=>{
     const l=q.kf[q.kf.length-1],gap=t-l.t,d=Math.hypot(b.x+b.w/2-l.x-l.w/2,b.y+b.h/2-l.y-l.h/2);
-    if(d<Math.max(b.w,l.w)*(.8+gap*1.5))cand.push({d,bi,qi})}));
+    if(d<Math.max(b.w,l.w)*(1+gap*1.5))cand.push({d,bi,qi})}));
   cand.sort((a,b)=>a.d-b.d);const ub=new Set(),uq=new Set();
   const thumb=(q,b)=>{const c=q.thumb||(q.thumb=document.createElement('canvas'));c.width=c.height=48;
     c.getContext('2d').drawImage(fc,Math.max(0,b.x),Math.max(0,b.y),b.w,b.h,0,0,48,48)};
   for(const c of cand){if(ub.has(c.bi)||uq.has(c.qi))continue;ub.add(c.bi);uq.add(c.qi);
-    const q=open[c.qi],b=boxes[c.bi];q.kf.push({t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1});q.lastT=t;q.n++;
+    const q=open[c.qi],b=boxes[c.bi];q.kf.push({t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1});q.lastT=t;q.n++;q.sum+=b.score;
     if(b.score>q.best){q.best=b.score;thumb(q,b)}}
-  boxes.forEach((b,bi)=>{if(ub.has(bi))return;const q={kf:[{t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1}],lastT:t,n:1,best:b.score};thumb(q,b);tracks.push(q)});
+  boxes.forEach((b,bi)=>{if(ub.has(bi))return;const q={kf:[{t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1}],lastT:t,n:1,best:b.score,sum:b.score};thumb(q,b);tracks.push(q)});
 }
 
 // ---- text helpers ----
@@ -310,7 +312,7 @@ async function scanAll(){
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();setBusy(true);pg.hidden=false;pg.value=0;
   const back=v.currentTime,dur=v.duration,fstep=Math.max(.3,dur/90),ostep=Math.max(1,dur/30),t00=performance.now();
-  const notes=[],maxGap=Math.max(1.25,fstep*3);let worker=null,ok=true;
+  const notes=[],maxGap=Math.max(2,fstep*5);MAXGAP=maxGap;let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
     let useFaces=wantFaces;
@@ -343,7 +345,7 @@ async function scanAll(){
       await seekTo(t);
       if(useFaces){
         fcx.drawImage(v,0,0,fc.width,fc.height);
-        const found=await runFaces(fc,!ssd||i%6===0,null,true);addSample(ftracks,t,found,k1);
+        const found=await runFaces(fc,!ssd||i%4===0,null,true);addSample(ftracks,t,found,k1);
         // a face that was tracked but not found this time: look again closely around where it was
         const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
         if(miss.length){const more=(await runFaces(fc,false,miss,true,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
@@ -375,13 +377,13 @@ async function scanAll(){
     }
     // faces -> regions
     const smooth=kf=>kf.map((b,i)=>{const n=[kf[Math.max(0,i-1)],b,kf[Math.min(kf.length-1,i+1)]],m=k=>(n[0][k]+n[1][k]+n[2][k])/3;return{t:b.t,x:m('x'),y:m('y'),w:m('w'),h:m('h')}});
-    const kept=ftracks.filter(q=>q.best>=.7||q.n>=3||(q.n>=2&&q.best>=.5));
+    const kept=ftracks.filter(q=>q.best>=.7||(q.n>=3&&q.sum/q.n>=.5)||(q.n>=2&&q.best>=.6));
     const faceR=kept.sort((a,b)=>a.kf[0].t-b.kf[0].t).map((q,i)=>{
       const sm=smooth(q.kf);
       const kf=sm.map((b,j)=>{
         const nb=[sm[j-1],sm[j+1]].filter(Boolean),mv=Math.max(0,...nb.map(o=>Math.hypot(o.x+o.w/2-b.x-b.w/2,o.y+o.h/2-b.y-b.h/2)));
         const p=Math.max(b.w,b.h)*.35+mv*.6;return{t:b.t,x:b.x-p,y:b.y-p*1.2,w:b.w+2*p,h:b.h+2.4*p}});
-      return{k:'face',label:'Face '+(i+1),on:true,kf,pad:fstep*1.5+.05,thumb:q.thumb}});
+      return{k:'face',label:'Face '+(i+1),on:true,kf,pad:Math.max(.6,fstep*2),thumb:q.thumb}});
     const textR=tt.filter(q=>q.n>=2||q.k==='email'||dur<=3).map(q=>({k:q.k,x:q.x,y:q.y,w:q.w,h:q.h,label:q.k,t0:q.t0,t1:Math.min(q.t1,dur),on:true}));
     regions=regions.filter(r=>r.k==='area').concat(faceR,textR);
     scanned=true;emptyOk=false;

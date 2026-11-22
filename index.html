@@ -344,12 +344,12 @@ function faceWins(W,H,deep,hints,only){
 }
 function faceCluster(dets,W,H,loose){
   dets.sort((a,b)=>b.score-a.score);const cl=[];
-  for(const d of dets){const c=cl.find(c=>iou(c.top,d)>.4||contain(c.top,d)>.8);if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
+  for(const d of dets){const c=cl.find(c=>{const r=(c.top.w*c.top.h)/(d.w*d.h);return iou(c.top,d)>.4||(contain(c.top,d)>.8&&r>.4&&r<2.5)});if(c)c.m.push(d);else cl.push({top:d,m:[d]})}
   const minS=Math.max(10,Math.min(W,H)*.012),hi=ssd?.6:.55,lo=ssd?.4:.4,out=[];
   for(const c of cl){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
-    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H)continue;
+    if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.5*W*H||(b.w*b.h>.15*W*H&&b.score<.8))continue;
     if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
