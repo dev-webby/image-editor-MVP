@@ -94,7 +94,7 @@ footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:
 <script>
 const $=s=>document.querySelector(s),cv=$('#cv'),ctx=cv.getContext('2d'),tc=document.createElement('canvas'),tc2=document.createElement('canvas');
 const v=document.createElement('video');v.playsInline=true;v.setAttribute('playsinline','');v.preload='auto';
-let curMove=null,reloading=false,vErr=false,regions=[],drag=null,K=1,fd=null,rec=false,busy=false,aud=null,user=null,scanned=false,emptyOk=false,curMR=null,dlUrl=null;
+let vLeft=0,curMove=null,reloading=false,vErr=false,regions=[],drag=null,K=1,fd=null,rec=false,busy=false,aud=null,user=null,scanned=false,emptyOk=false,curMR=null,dlUrl=null;
 const FREE_SECS=15,FREE_H=480,MAX_SECS=180;
 const RX={email:/[\w.+-]+@[\w-]+\.[\w.-]+/g,phone:/\+?\d[\d\s().-]{7,}\d/g,card:/\b(?:\d[ -]?){13,19}\b/g,url:/(?:https?:\/\/|www\.)\S+/gi};
 const CFG=window.APP_CONFIG||{};
@@ -110,7 +110,9 @@ const even=n=>Math.max(2,Math.round(n/2)*2);
 async function acct(){
   if(!sb)return;
   try{const{data:{session}}=await sb.auth.getSession();user=session?session.user:null;
-    if(user){const b=await sb.rpc('my_balance');$('#bal').textContent=(b.data||0)+' credits'}}catch(e){}
+    if(user){const b=await sb.rpc('my_balance'),l=await sb.rpc('my_video_left');vLeft=(l&&l.data)||0;
+      const p=await sb.from('profiles').select('plan,plan_renews_at').maybeSingle(),pd=p.data,sub=pd&&pd.plan!=='free'&&new Date(pd.plan_renews_at)>new Date();
+      $('#bal').textContent=(sub?'Monthly · ':'')+(b.data||0)+' credits'}}catch(e){}
 }
 acct();
 
@@ -574,8 +576,11 @@ $('#go').onclick=async()=>{
   const free=dur<=FREE_SECS&&!$('#full').checked,blocks=Math.max(1,Math.ceil(dur/30));
   if(!free){
     if(!sb||!user){dst('Full quality needs an account and credits. Sign in on the home page, then come back.');return}
-    const b=await sb.rpc('my_balance');
-    if((b.data||0)<blocks*3){dst('This clip needs '+blocks*3+' credits. You can buy credits on the home page.');return}
+    await acct();
+    if(vLeft<blocks){
+      const b=await sb.rpc('my_balance');
+      if((b.data||0)<blocks*3){dst('This clip needs '+blocks*3+' credits'+(vLeft?' (your monthly video time has '+vLeft*30+' seconds left)':'')+'. You can buy credits on the home page.');return}
+    }
   }
   if(!window.MediaRecorder||!HTMLCanvasElement.prototype.captureStream){dst('This browser cannot export video. Try Chrome, Edge or a recent Safari.');return}
   // find everything first, so the exported video is never missing a face or email
