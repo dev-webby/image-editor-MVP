@@ -43,12 +43,28 @@ button.main{background:var(--tx);color:#fff}button:disabled{opacity:.5}
 .tabs a{padding:10px 18px;border:1px solid var(--tx);border-radius:99px;text-decoration:none;font-weight:600}
 .tabs a.on{background:var(--tx);color:#fff}
 .new{background:var(--hl);color:#12181b;border-radius:99px;font-size:.7rem;padding:1px 7px;margin-left:6px;vertical-align:middle}
+input[type=email],input[type=password]{font:inherit;padding:10px;border:1px solid var(--bd);border-radius:8px;width:100%}
+dialog{border:1px solid var(--bd);border-radius:12px;padding:20px;max-width:360px;width:calc(100% - 32px)}
+dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
 footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:20px 16px}
 </style></head><body>
 <header class="top"><div class="bar">
  <a class="brand" href="index.html">Privacy Cleaner</a>
- <a href="index.html">Images</a><strong id="bal"></strong>
+ <nav style="margin-left:auto;display:flex;gap:14px;align-items:center"><a href="index.html">Images</a><a href="index.html#pricing">Pricing</a></nav>
+ <div id="auth" style="display:flex;gap:8px;align-items:center">
+  <span id="out"><button id="bin">Sign in</button> <button class="main" id="bup">Sign up</button></span>
+  <span id="inn" hidden><strong id="bal"></strong> <button id="so">Log out</button></span>
+ </div>
 </div></header>
+<dialog id="dlg">
+ <h2 id="dt">Sign in</h2>
+ <input id="em" type="email" placeholder="Email" autocomplete="email">
+ <input id="pw" type="password" placeholder="Password (6+ characters)" autocomplete="current-password">
+ <label class="sub" style="display:flex;gap:6px;align-items:center;margin:6px 0"><input type="checkbox" id="showpw" style="width:auto"> Show password</label>
+ <div id="am" role="status"></div>
+ <div class="row"><button class="main" id="ago">Sign in</button><button id="x">Cancel</button></div>
+ <p class="sub"><a href="#" id="sw">New here? Create an account</a></p>
+</dialog>
 <main>
 <section class="hero">
  <h1>Hide private details in video</h1>
@@ -113,12 +129,36 @@ const even=n=>Math.max(2,Math.round(n/2)*2);
 
 async function acct(){
   if(!sb)return;
-  try{const{data:{session}}=await sb.auth.getSession();user=session?session.user:null;
+  try{const{data:{session}}=await sb.auth.getSession();user=session?session.user:null;$('#out').hidden=!!user;$('#inn').hidden=!user;
     if(user){const b=await sb.rpc('my_balance'),l=await sb.rpc('my_video_left');vLeft=(l&&l.data)||0;
       const p=await sb.from('profiles').select('plan,plan_renews_at').maybeSingle(),pd=p.data,sub=pd&&pd.plan!=='free'&&new Date(pd.plan_renews_at)>new Date();
       $('#bal').textContent=(sub?'Monthly · ':'')+(b.data||0)+' credits'}}catch(e){}
 }
 acct();
+let authMode='in';
+function openAuth(k){
+  authMode=k;const up=k==='up';
+  $('#dt').textContent=up?'Create your account':'Sign in';
+  $('#ago').textContent=up?'Create account':'Sign in';
+  $('#sw').textContent=up?'Have an account? Sign in':'New here? Create an account';
+  $('#pw').autocomplete=up?'new-password':'current-password';
+  $('#am').textContent='';$('#dlg').showModal();
+}
+$('#bin').onclick=()=>openAuth('in');$('#bup').onclick=()=>openAuth('up');
+$('#sw').onclick=e=>{e.preventDefault();openAuth(authMode==='in'?'up':'in')};
+$('#x').onclick=()=>$('#dlg').close();
+$('#showpw').onchange=e=>{$('#pw').type=e.target.checked?'text':'password'};
+$('#so').onclick=async()=>{if(sb)await sb.auth.signOut();user=null;vLeft=0;acct()};
+$('#ago').onclick=async()=>{
+  const m=$('#am');if(!sb){m.textContent='Sign-in is not available right now.';return}
+  const email=$('#em').value.trim(),password=$('#pw').value;m.textContent='Please wait…';
+  const r=authMode==='up'?await sb.auth.signUp({email,password,options:{emailRedirectTo:location.origin+'/'}}):await sb.auth.signInWithPassword({email,password});
+  if(r.error){m.textContent=r.error.message;return}
+  if(authMode==='up'&&r.data.user&&Array.isArray(r.data.user.identities)&&r.data.user.identities.length===0){m.textContent='This email already has an account. Tap “Have an account? Sign in” below.';return}
+  if(authMode==='up'&&!r.data.session){m.textContent='Check your email to confirm your account, then sign in.';return}
+  $('#dlg').close();acct();
+};
+if(sb)sb.auth.onAuthStateChange(()=>setTimeout(acct,0));
 
 $('#file').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)openVideo(f)};
 $('#new').onclick=()=>{v.pause();$('#file').click()};
@@ -586,11 +626,11 @@ $('#go').onclick=async()=>{
   if(dur>MAX_SECS){dst('This video is longer than 3 minutes. Trim it first, then try again.');return}
   const free=dur<=FREE_SECS&&!$('#qfull').checked,blocks=Math.max(1,Math.ceil(dur/30));
   if(!free){
-    if(!sb||!user){dst('Full quality needs an account and credits. Sign in on the home page, then come back.');return}
+    if(!sb||!user){dst('Full quality needs an account and credits. Sign in or sign up, then press Create again.');openAuth('in');return}
     await acct();
     if(vLeft<blocks){
       const b=await sb.rpc('my_balance');
-      if((b.data||0)<blocks*3){dst('This clip needs '+blocks*3+' credits'+(vLeft?' (your monthly video time has '+vLeft*30+' seconds left)':'')+'. You can buy credits on the home page.');return}
+      if((b.data||0)<blocks*3){dst('This clip needs '+blocks*3+' credits'+(vLeft?' (your monthly video time has '+vLeft*30+' seconds left)':'')+'. Buy credits on the pricing page.');$('#dst').insertAdjacentHTML('beforeend',' <a href="index.html#pricing">Open pricing</a>');return}
     }
   }
   if(!window.MediaRecorder||!HTMLCanvasElement.prototype.captureStream){dst('This browser cannot export video. Try Chrome, Edge or a recent Safari.');return}
