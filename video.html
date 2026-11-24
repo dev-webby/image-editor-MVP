@@ -110,6 +110,7 @@ footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:
 <footer>© Privacy Cleaner · <a href="about.html">About</a> · <a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a></footer>
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="textfind.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.js"></script>
 <script>
 const $=s=>document.querySelector(s),cv=$('#cv'),ctx=cv.getContext('2d'),tc=document.createElement('canvas'),tc2=document.createElement('canvas');
@@ -417,23 +418,27 @@ async function scanAll(){
     if(useText){st.textContent='Loading the text reader…';try{worker=await Tesseract.createWorker('eng')}catch(e){useText=false;notes.push('The text reader could not load, so text was not scanned.')}}
     if(!useFaces&&!useText){st.textContent=notes.join(' ');ok=false;return false}
     const k1=Math.min(1,1280/Math.max(v.videoWidth,v.videoHeight));fc.width=Math.round(v.videoWidth*k1);fc.height=Math.round(v.videoHeight*k1);
-    const k0=Math.min(1,1280/Math.max(v.videoWidth,v.videoHeight));
-    const sm=document.createElement('canvas');sm.width=sm.height=24;const sx=sm.getContext('2d',{willReadFrequently:true});
+    const k0=Math.min(1.6,1600/Math.max(v.videoWidth,v.videoHeight));   // size the text reader sees (small videos are enlarged)
+    const SW=160,SH=Math.max(8,Math.round(SW*v.videoHeight/v.videoWidth));
+    const sm=document.createElement('canvas');sm.width=SW;sm.height=SH;const sx=sm.getContext('2d',{willReadFrequently:true});
     const times=[];for(let t=0;t<dur-.05;t+=fstep)times.push(t);if(!times.length)times.push(0);
-    let nextO=0,prevSig=null,prevJob=null;const jobs=[];
-    const ocrHits=data=>{const hits=[];
-      data.lines.forEach(L=>{
-        let s='';const map=[];
-        L.words.forEach(w=>{const txt=w.confidence<40?'#'.repeat(Math.max(1,w.text.length)):w.text;map.push([s.length,s.length+txt.length,w.bbox]);s+=txt+' '});
-        const taken=[];
-        ['card','phone','email','url'].filter(k=>texts.includes(k)).forEach(k=>{for(const m of s.matchAll(RX[k])){
-          const a=m.index,e=a+m[0].length;
-          if(!okHit(k,m[0])||taken.some(q=>q[0]<e&&q[1]>a))continue;
-          const bx=map.filter(q=>q[0]<e&&q[1]>a).map(q=>q[2]);if(!bx.length)continue;
-          taken.push([a,e]);const p=4,x0=Math.min(...bx.map(o=>o.x0))-p,y0=Math.min(...bx.map(o=>o.y0))-p;
-          hits.push({k,x:x0/k0,y:y0/k0,w:(Math.max(...bx.map(o=>o.x1))+p-x0)/k0,h:(Math.max(...bx.map(o=>o.y1))+p-y0)/k0});
-        }});
-      });return hits};
+    const jobs=[],maxWait=Math.max(1.2,ostep*1.2),EPS=.0008;
+    let lastSig=null,ocrSig=null,curJob=null,lastOcrT=-9,chain=Promise.resolve();
+    const wordsOf=data=>{const out=[];
+      const take=w=>{if(w.text&&w.text.trim()&&w.confidence>=25)out.push({text:w.text,x0:w.bbox.x0,y0:w.bbox.y0,x1:w.bbox.x1,y1:w.bbox.y1,conf:w.confidence})};
+      (data.lines||[]).forEach(L=>(L.words||[]).forEach(take));if(!out.length&&data.words)data.words.forEach(take);return out};
+    const recog=async(oc,psm)=>{await worker.setParameters({tessedit_pageseg_mode:String(psm),user_defined_dpi:'300'});return wordsOf((await worker.recognize(oc)).data)};
+    const hitsOf=lists=>{const all=[];
+      for(const ws of lists)for(const row of TF.rows(ws))for(const m of TF.matches(row,texts)){
+        const seg=row.slice(m.i,m.j+1),txt=seg.map(w=>w.text).join(' ');
+        if(!m.label&&!okHit(m.cat,txt))continue;
+        const p=Math.max(3,(seg[0].y1-seg[0].y0)*.2),x0=Math.min(...seg.map(o=>o.x0))-p,y0=Math.min(...seg.map(o=>o.y0))-p;
+        all.push({k:m.cat,len:txt.length,x:x0/k0,y:y0/k0,w:(Math.max(...seg.map(o=>o.x1))+p-x0)/k0,h:(Math.max(...seg.map(o=>o.y1))+p-y0)/k0});
+      }
+      all.sort((a,b)=>b.len-a.len);const keep=[];
+      for(const h of all)if(!keep.some(q=>q.k===h.k&&contain(q,h)>.6))keep.push(h);
+      return keep};
+    const runOcr=(oc,sparse)=>{const p=chain.then(async()=>{const a=await recog(oc,3);let b=[];if(sparse){try{b=await recog(oc,11)}catch(e){}}return hitsOf([a,b])}).catch(()=>[]);chain=p;return p};
     for(let i=0;i<times.length;i++){
       const tg=times[i];pg.value=i/times.length;
       const el=(performance.now()-t00)/1000,eta=i>3?Math.round(el/i*(times.length-i)):0;
@@ -446,30 +451,33 @@ async function scanAll(){
         const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
         if(miss.length){const more=(await runFaces(fc,false,miss,true,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
       }
-      if(useText&&t>=nextO-1e-6){      // text reading runs in its own worker while the next frames are searched for faces
-        nextO=t+ostep;
-        sx.drawImage(v,0,0,24,24);const px=sx.getImageData(0,0,24,24).data,sig=[];let mean=0;
-        for(let j=0;j<px.length;j+=4){const g=(px[j]+px[j+1]+px[j+2])/3;sig.push(g);mean+=g}mean/=576;
-        if(prevSig&&prevJob&&sig.reduce((q,g,j)=>q+Math.abs(g-prevSig[j]),0)/576<3){jobs.push({t,p:prevJob})}
-        else{
+      if(useText){
+        // Read the text when the picture has settled after a change, and whenever it has kept moving for a while.
+        sx.drawImage(v,0,0,SW,SH);const px=sx.getImageData(0,0,SW,SH).data,sig=new Uint8Array(SW*SH);let mean=0;
+        for(let j=0,q=0;j<px.length;j+=4,q++){const g=(px[j]*.3+px[j+1]*.59+px[j+2]*.11)|0;sig[q]=g;mean+=g}mean/=sig.length;
+        const diff=(a,b)=>{let c=0;for(let j=0;j<a.length;j++)if(Math.abs(a[j]-b[j])>20)c++;return c/a.length};
+        const dPrev=lastSig?diff(sig,lastSig):1,dOcr=ocrSig?diff(sig,ocrSig):1;
+        if(curJob&&dOcr<=EPS)curJob.tB=t+fstep/2;           // same picture as the last reading: it still applies
+        else if(!curJob||dPrev<=EPS||t-lastOcrT>=maxWait){
           if(jobs.length>=3)await jobs[jobs.length-3].p;
           const oc=document.createElement('canvas');oc.width=Math.round(v.videoWidth*k0);oc.height=Math.round(v.videoHeight*k0);
-          const ox=oc.getContext('2d',{willReadFrequently:true});ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);
-          prevJob=worker.recognize(oc).then(r=>ocrHits(r.data));jobs.push({t,p:prevJob});
+          const ox=oc.getContext('2d',{willReadFrequently:true});ox.imageSmoothingQuality='high';ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);
+          const job={tA:curJob?curJob.tB:0,tB:t+fstep/2,p:runOcr(oc,jobs.length<40)};
+          jobs.push(job);curJob=job;ocrSig=sig;lastOcrT=t;
         }
-        prevSig=sig;
+        lastSig=sig;
       }
     }
-    let prevOT=-1,prevP=null;
-    for(const j of jobs){
-      const hits=await j.p,t=j.t,ta=Math.max(0,t-ostep/2-.15),tb=t+ostep/2+.15;
+    let prevJ=-1;
+    for(let ji=0;ji<jobs.length;ji++){
+      const j=jobs[ji],hits=await j.p,ta=Math.max(0,j.tA-.12),tb=j.tB+.12;
       hits.forEach(h=>{
-        const tr=tt.find(q=>q.k===h.k&&q.lastO===prevOT&&iou(q,h)>.5);
+        const tr=tt.find(q=>q.k===h.k&&q.lastJ===prevJ&&iou(q,h)>.5);
         if(tr){const x1=Math.min(tr.x,h.x),y1=Math.min(tr.y,h.y),x2=Math.max(tr.x+tr.w,h.x+h.w),y2=Math.max(tr.y+tr.h,h.y+h.h);
-          Object.assign(tr,{x:x1,y:y1,w:x2-x1,h:y2-y1,lastO:t,t1:tb,n:tr.n+1})}
-        else tt.push({...h,lastO:t,t0:ta,t1:tb,n:1});
+          Object.assign(tr,{x:x1,y:y1,w:x2-x1,h:y2-y1,lastJ:ji,t1:tb,n:tr.n+1})}
+        else tt.push({...h,lastJ:ji,t0:ta,t1:tb,n:1});
       });
-      prevOT=t;
+      prevJ=ji;
     }
     // faces -> regions
     const smooth=kf=>kf.map((b,i)=>{const n=[kf[Math.max(0,i-1)],b,kf[Math.min(kf.length-1,i+1)]],m=k=>(n[0][k]+n[1][k]+n[2][k])/3;return{t:b.t,x:m('x'),y:m('y'),w:m('w'),h:m('h')}});
@@ -480,7 +488,7 @@ async function scanAll(){
         const nb=[sm[j-1],sm[j+1]].filter(Boolean),mv=Math.max(0,...nb.map(o=>Math.hypot(o.x+o.w/2-b.x-b.w/2,o.y+o.h/2-b.y-b.h/2)));
         const p=Math.max(b.w,b.h)*.35+Math.min(mv*.6,Math.max(b.w,b.h)*.5);return{t:b.t,x:b.x-p,y:b.y-p*1.2,w:b.w+2*p,h:b.h+2.4*p}});
       return{k:'face',label:'Face '+(i+1),on:true,kf,pad:Math.max(.9,fstep*3),thumb:q.thumb}});
-    const textR=tt.filter(q=>q.n>=2||q.k==='email'||dur<=3).map(q=>({k:q.k,x:q.x,y:q.y,w:q.w,h:q.h,label:q.k,t0:q.t0,t1:Math.min(q.t1,dur),on:true}));
+    const textR=tt.filter(q=>q.n>=2||q.k==='email'||dur<=3||q.t1-q.t0>=.45).map(q=>({k:q.k,x:q.x,y:q.y,w:q.w,h:q.h,label:q.k,t0:q.t0,t1:Math.min(q.t1,dur),on:true}));
     regions=regions.filter(r=>r.k==='area').concat(faceR,textR);
     scanned=true;emptyOk=false;
     const n=faceR.length+textR.length;

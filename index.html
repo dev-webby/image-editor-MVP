@@ -118,6 +118,7 @@ dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
    <label><input type="checkbox" class="cat" value="face"> Faces</label>
   </div>
   <button class="main" id="scan">Find private details</button>
+  <button id="deep" title="Slower. Also reads tilted photos at other angles.">Look harder</button>
   <div id="st" role="status"></div>
   <div class="chips" id="list"></div>
  </div>
@@ -190,6 +191,7 @@ dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
 
 <script src="config.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="textfind.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.50.0/dist/umd/supabase.js"></script>
 <script>
 const $=s=>document.querySelector(s), cv=$('#cv'), ctx=cv.getContext('2d');
@@ -258,9 +260,10 @@ dz.ondragleave=()=>dz.classList.remove('over');
 dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');load(e.dataTransfer.files[0])};
 
 function fx(r,s){
-  const{x,y,w,h}=r;
-  if(mode()==='bar'){ctx.fillStyle='#000';ctx.fillRect(x,y,w,h);return}
-  ctx.save();ctx.beginPath();ctx.rect(x,y,w,h);ctx.clip();
+  const{x,y,w,h,q}=r;
+  const path=()=>{ctx.beginPath();if(q){ctx.moveTo(q[0][0],q[0][1]);for(let i=1;i<4;i++)ctx.lineTo(q[i][0],q[i][1]);ctx.closePath()}else ctx.rect(x,y,w,h)};
+  if(mode()==='bar'){ctx.fillStyle='#000';path();ctx.fill();return}
+  ctx.save();path();ctx.clip();
   if(mode()==='blur'){                          // down/up scaling: works in Safari, which ignores ctx.filter
     const f=Math.max(3,strength()*s*.8),t1=document.createElement('canvas'),t2=document.createElement('canvas');
     t1.width=Math.max(2,Math.ceil(w/f));t1.height=Math.max(2,Math.ceil(h/f));t2.width=Math.max(2,Math.ceil(t1.width/2));t2.height=Math.max(2,Math.ceil(t1.height/2));
@@ -391,23 +394,30 @@ async function findFaces(){
   ac.width=Math.round(img.width*k);ac.height=Math.round(img.height*k);ac.getContext('2d').drawImage(img,0,0,ac.width,ac.height);
   return(await runFaces(ac,2)).map(b=>({originX:b.x/k,originY:b.y/k,width:b.w/k,height:b.h/k}));
 }
-$('#scan').onclick=async()=>{
+let ocrW=null;
+async function ocrWords(canvas,psm){
+  if(!ocrW)ocrW=await Tesseract.createWorker('eng');
+  await ocrW.setParameters({tessedit_pageseg_mode:String(psm),preserve_interword_spaces:'1',user_defined_dpi:'300'});
+  const{data}=await ocrW.recognize(canvas),out=[];
+  (data.lines||[]).forEach(L=>(L.words||[]).forEach(w=>{if(w.text&&w.text.trim())out.push({text:w.text,x0:w.bbox.x0,y0:w.bbox.y0,x1:w.bbox.x1,y1:w.bbox.y1,conf:w.confidence})}));
+  if(!out.length&&data.words)data.words.forEach(w=>{if(w.text&&w.text.trim())out.push({text:w.text,x0:w.bbox.x0,y0:w.bbox.y0,x1:w.bbox.x1,y1:w.bbox.y1,conf:w.confidence})});
+  return out;
+}
+function pushHit(h){
+  const b=TF.bounds(h.q),tilt=h.q.some((p,i)=>{const n=h.q[(i+1)%4];return Math.abs(p[0]-n[0])>1.5&&Math.abs(p[1]-n[1])>1.5});
+  regions.push({x:b.x,y:b.y,w:b.w,h:b.h,label:h.cat,on:true,q:tilt?h.q:null});
+}
+async function runScan(deep){
   const st=$('#st'),on=[...document.querySelectorAll('.cat:checked')].map(c=>c.value);
   if(!on.length){st.textContent='Pick at least one type to look for.';return}
   save();regions=regions.filter(r=>r.label==='Manual');st.textContent='Scanning on your device…';
+  $('#scan').disabled=$('#deep').disabled=true;
   let msg='';
   try{
-    if(on.some(k=>RX[k])){
-      const{data}=await Tesseract.recognize(ocrSource(),'eng');
-      data.lines.forEach(L=>{
-        let t='';const map=[];
-        L.words.forEach(w=>{map.push([t.length,t.length+w.text.length,w.bbox]);t+=w.text+' '});
-        on.filter(k=>RX[k]).forEach(k=>{
-          for(const m of t.matchAll(RX[k])){
-            const a=m.index,b=a+m[0].length,bx=map.filter(q=>q[0]<b&&q[1]>a).map(q=>q[2]);
-            if(bx.length)add(bx,k);
-          }});
-      });
+    const cats=on.filter(k=>k!=='face');
+    if(cats.length){
+      const hits=await TF.scan(img,cats,ocrWords,{sweep:deep,progress:(i,n,a)=>{st.textContent='Reading text… step '+(i+1)+' of '+n+(a?' (straightening a tilted photo)':'')}});
+      hits.forEach(pushHit);
     }
     if(on.includes('face')){
       try{
@@ -416,12 +426,15 @@ $('#scan').onclick=async()=>{
           regions.push({x:b.originX-p,y:b.originY-p,w:b.width+2*p,h:b.height+2*p,label:'face',on:true})});
       }catch(e){msg=' Face model could not load. Check your connection or draw over faces by hand.'}
     }
-    st.textContent=`Found ${regions.filter(r=>r.label!=='Manual').length} item(s).${msg} Uncheck any you want to keep.`+(on.includes('face')?' [Face finder: '+faceEngine()+']':'');
+    st.textContent=`Found ${regions.filter(r=>r.label!=='Manual').length} item(s).${msg} Uncheck any you want to keep.`+(deep?'':' Missed something? Press “Look harder”.')+(on.includes('face')?' [Face finder: '+faceEngine()+']':'');
   }catch(err){
     st.textContent='Scan failed. Check your connection and try again. You can still draw areas by hand.';
   }
+  $('#scan').disabled=$('#deep').disabled=false;
   list();draw();
-};
+}
+$('#scan').onclick=()=>runScan(false);
+$('#deep').onclick=()=>runScan(true);
 
 // ---- Accounts and credits (settings live in config.js) ----
 const CFG=window.APP_CONFIG||{};
