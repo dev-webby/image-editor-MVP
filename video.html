@@ -80,7 +80,11 @@ footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:
   <div class="row"><button class="main" id="scan">Find private details in the whole video</button></div>
   <div id="st" role="status"></div><div class="chips" id="list"></div>
  </div>
- <label><input type="checkbox" id="full"> Full quality (3 credits per 30 seconds)</label>
+ <fieldset id="qual" style="border:1px solid var(--bd);border-radius:10px;padding:10px 14px;margin:10px 0">
+  <legend><strong>Export quality</strong></legend>
+  <label style="display:block;margin:4px 0"><input type="radio" name="q" id="qfree" checked> <span id="qfreet">Free: 480p, up to 15 seconds</span></label>
+  <label style="display:block;margin:4px 0"><input type="radio" name="q" id="qfull"> <span id="qfullt">Full quality: original sharpness, 3 credits per 30 seconds (needs an account)</span></label>
+ </fieldset>
  <div class="row"><button id="new">New video</button><button id="clear">Clear areas</button><button class="main" id="go">Create redacted video</button></div>
  <progress id="pg" max="1" value="0" hidden style="width:100%"></progress>
  <p><a id="dl" class="main" hidden style="display:inline-block;padding:9px 14px;border-radius:8px;background:var(--tx);color:#fff;text-decoration:none;font-weight:600">Download video</a></p>
@@ -119,12 +123,19 @@ acct();
 $('#file').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)openVideo(f)};
 $('#new').onclick=()=>{v.pause();$('#file').click()};
 $('#clear').onclick=()=>{regions=regions.filter(r=>r.k!=='area');emptyOk=false;list();frame()};
+function qualUI(){
+  const w=v.videoWidth,h=v.videoHeight,d=v.duration,e=n=>n%2?n+1:n,kf=Math.min(1,FREE_H/Math.min(w,h)),kF=Math.min(1,1920/Math.max(w,h)),
+    blocks=Math.max(1,Math.ceil(d/30));
+  $('#qfreet').textContent='Free: '+e(Math.round(w*kf))+'×'+e(Math.round(h*kf))+' (lower quality)'+(d>FREE_SECS?' — only for clips up to 15 seconds':'');
+  $('#qfullt').textContent='Full quality: '+e(Math.round(w*kF))+'×'+e(Math.round(h*kF))+' (sharp), '+blocks*3+' credits for this clip (needs an account)';
+  $('#qfree').disabled=d>FREE_SECS;if(d>FREE_SECS)$('#qfull').checked=true;
+}
 function openVideo(file){
   v.pause();scanned=false;emptyOk=false;$('#dl').hidden=true;
   v.src=URL.createObjectURL(file);
   v.onloadedmetadata=()=>{if(v.duration===Infinity){v.currentTime=1e7;v.addEventListener('timeupdate',()=>{v.currentTime=0},{once:true})}};
   v.onloadeddata=()=>{if(reloading)return;cv.width=v.videoWidth;cv.height=v.videoHeight;regions=[];K=1;list();
-    $('#drop').hidden=true;$('#editor').hidden=false;$('#st').textContent='';
+    $('#drop').hidden=true;$('#editor').hidden=false;$('#st').textContent='';qualUI();
     dst(v.duration>MAX_SECS?'This video is longer than 3 minutes. Trim it first, then try again.':'Free clips (up to 15 seconds) export at 480p. Full quality uses 3 credits per 30 seconds.');
     frame();tm()};
   v.onerror=()=>{if(busy){vErr=true;return}const c=v.error?v.error.code:0,m=c===4?'This browser cannot play this video format (often HEVC/H.265). Save or share it as a standard MP4 (H.264) and try again.':c===3?'This video file looks damaged or cut off. Try another copy of it.':'This video could not be opened here. Try Chrome or Safari, or save it as MP4 first.';
@@ -573,7 +584,7 @@ $('#go').onclick=async()=>{
   const dur=v.duration;
   if(!isFinite(dur)||dur<=0)return;
   if(dur>MAX_SECS){dst('This video is longer than 3 minutes. Trim it first, then try again.');return}
-  const free=dur<=FREE_SECS&&!$('#full').checked,blocks=Math.max(1,Math.ceil(dur/30));
+  const free=dur<=FREE_SECS&&!$('#qfull').checked,blocks=Math.max(1,Math.ceil(dur/30));
   if(!free){
     if(!sb||!user){dst('Full quality needs an account and credits. Sign in on the home page, then come back.');return}
     await acct();
