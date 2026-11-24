@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="google-site-verification" content="bBlK9LQy4G0z9PQKARhE-f1uA0V9wMooiLhJ4rkCUl0" />
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="canonical" href="https://screenshotprivacycleaner.com/">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
@@ -80,6 +79,7 @@ dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
  <h2 id="dt">Sign in</h2>
  <input id="em" type="email" placeholder="Email" autocomplete="email">
  <input id="pw" type="password" placeholder="Password (6+ characters)" autocomplete="current-password">
+ <label class="sub" style="display:flex;gap:6px;align-items:center;margin:6px 0"><input type="checkbox" id="showpw" style="width:auto"> Show password</label>
  <div id="am" role="status"></div>
  <div class="row"><button class="main" id="go">Sign in</button><button id="x">Cancel</button></div>
  <p class="sub"><a href="#" id="sw">New here? Create an account</a></p>
@@ -433,11 +433,13 @@ function openAuth(k){
 $('#bin').onclick=()=>openAuth('in');$('#bup').onclick=()=>openAuth('up');
 $('#sw').onclick=e=>{e.preventDefault();openAuth(authMode==='in'?'up':'in')};
 $('#x').onclick=()=>$('#dlg').close();
+$('#showpw').onchange=e=>{$('#pw').type=e.target.checked?'text':'password'};
 $('#so').onclick=()=>sb.auth.signOut();
 $('#go').onclick=async()=>{
   const email=$('#em').value.trim(),password=$('#pw').value,m=$('#am');m.textContent='Please wait…';
-  const r=authMode==='up'?await sb.auth.signUp({email,password}):await sb.auth.signInWithPassword({email,password});
+  const r=authMode==='up'?await sb.auth.signUp({email,password,options:{emailRedirectTo:location.origin+'/'}}):await sb.auth.signInWithPassword({email,password});
   if(r.error){m.textContent=r.error.message;return}
+  if(authMode==='up'&&r.data.user&&Array.isArray(r.data.user.identities)&&r.data.user.identities.length===0){m.textContent='This email already has an account. Tap “Have an account? Sign in” below.';return}
   if(authMode==='up'&&!r.data.session){m.textContent='Check your email to confirm your account, then sign in.';return}
   $('#dlg').close();
 };
