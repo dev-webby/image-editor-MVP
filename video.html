@@ -164,12 +164,14 @@ if(sb)sb.auth.onAuthStateChange(()=>setTimeout(acct,0));
 $('#file').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)openVideo(f)};
 $('#new').onclick=()=>{v.pause();$('#file').click()};
 $('#clear').onclick=()=>{regions=regions.filter(r=>r.k!=='area');emptyOk=false;list();frame()};
+document.querySelectorAll('input[name=q]').forEach(r=>r.onchange=()=>{scanned=false});
+function expLen(){const d=v.duration;return(!$('#qfull').checked&&d>FREE_SECS)?FREE_SECS:d}
 function qualUI(){
   const w=v.videoWidth,h=v.videoHeight,d=v.duration,e=n=>n%2?n+1:n,kf=Math.min(1,FREE_H/Math.min(w,h)),kF=Math.min(1,1920/Math.max(w,h)),
     blocks=Math.max(1,Math.ceil(d/30));
-  $('#qfreet').textContent='Free: '+e(Math.round(w*kf))+'×'+e(Math.round(h*kf))+' (lower quality)'+(d>FREE_SECS?' — only for clips up to 15 seconds':'');
+  $('#qfreet').textContent='Free: '+e(Math.round(w*kf))+'×'+e(Math.round(h*kf))+' (lower quality)'+(d>FREE_SECS?' — first 15 seconds of this clip':'');
   $('#qfullt').textContent='Full quality: '+e(Math.round(w*kF))+'×'+e(Math.round(h*kF))+' (sharp), '+blocks*3+' credits for this clip (needs an account)';
-  $('#qfree').disabled=d>FREE_SECS;if(d>FREE_SECS)$('#qfull').checked=true;
+  $('#qfree').disabled=false;$('#qfree').checked=true;
 }
 function openVideo(file){
   v.pause();scanned=false;emptyOk=false;$('#dl').hidden=true;
@@ -331,23 +333,32 @@ function faceCluster(dets,W,H,loose){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
     if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.7*W*H||(b.w*b.h>.4*W*H&&b.score<.8))continue;
-    if(loose){if(c.m.some(d=>d.s)?b.score>=.35:b.score>=.55)out.push(b)}
+    if(loose){if(c.m.some(d=>d.s)?b.score>=(loose===2?.25:.35):b.score>=(loose===2?.4:.55))out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
   return out;
 }
 const _tile=document.createElement('canvas');
-async function runFaces(src,deep,hints,loose,only){      // src: canvas holding the picture
-  const W=src.width,H=src.height,dets=[],mp=mpDet();
-  for(const[x,y,w,h,kind]of faceWins(W,H,deep,hints,only)){
+async function runFaces(src,deep,hints,loose,only,edge){      // src: canvas holding the picture
+  const W=src.width,H=src.height,dets=[],mp=mpDet(),wins=faceWins(W,H,deep,hints,only);
+  const em=edge?Math.round(Math.min(W,H)*.2):0;
+  if(edge)wins.push([-em,-em,W+2*em,H+2*em,'p']);
+  for(const[x,y,w,h,kind]of wins){
     let s=src,ox=0,oy=0;
-    if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
-    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:loose?.35:.5,maxResults:40})))
+    if(kind==='p'){          // frame with a border around it, so a face cut off by the edge still looks like a face
+      _tile.width=w;_tile.height=h;const g=_tile.getContext('2d');g.fillStyle='#808080';g.fillRect(0,0,w,h);
+      g.drawImage(src,0,0,W,1,em,0,W,em);g.drawImage(src,0,H-1,W,1,em,em+H,W,em);
+      g.drawImage(src,0,0,1,H,0,em,em,H);g.drawImage(src,W-1,0,1,H,em+W,em,em,H);
+      g.drawImage(src,em,em);s=_tile;ox=-em;oy=-em;
+    } else if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
+    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:loose===2?.2:loose?.35:.5,maxResults:40})))
       dets.push({x:d.box.x+ox,y:d.box.y+oy,w:d.box.width,h:d.box.height,score:d.score,s:1})}catch(e){}}
     if(mp&&(!ssd||kind!=='t')){try{for(const d of mp.detect(s).detections){const b=d.boundingBox;
       dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}}catch(e){}}
   }
-  return faceCluster(dets,W,H,loose);
+  const out=faceCluster(dets,W,H,loose);
+  if(edge)for(const b of out){const x1=Math.max(0,b.x),y1=Math.max(0,b.y),x2=Math.min(W,b.x+b.w),y2=Math.min(H,b.y+b.h);b.x=x1;b.y=y1;b.w=x2-x1;b.h=y2-y1}
+  return out.filter(b=>b.w>4&&b.h>4);
 }
 
 // Links detections from sample to sample so each person becomes one "Face" with a path through the video
@@ -408,7 +419,7 @@ async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();v.muted=true;setBusy(true);pg.hidden=false;pg.value=0;
-  const back=v.currentTime,dur=v.duration,fstep=Math.max(.3,dur/90),ostep=Math.max(1,dur/30),t00=performance.now();
+  const back=v.currentTime,dur=expLen(),fstep=Math.max(.3,dur/90),ostep=Math.max(1,dur/30),t00=performance.now();
   const notes=[],maxGap=2;MAXGAP=4;let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
@@ -446,10 +457,10 @@ async function scanAll(){
       await advanceTo(tg);const t=v.currentTime;
       if(useFaces){
         fcx.drawImage(v,0,0,fc.width,fc.height);
-        const found=await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true);addSample(ftracks,t,found,k1);
+        const found=await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true,false,i%2===0);addSample(ftracks,t,found,k1);
         // a face that was tracked but not found this time: look again closely around where it was
         const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
-        if(miss.length){const more=(await runFaces(fc,false,miss,true,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
+        if(miss.length){const more=(await runFaces(fc,false,miss,2,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
       }
       if(useText){
         // Read the text when the picture has settled after a change, and whenever it has kept moving for a while.
@@ -632,7 +643,7 @@ $('#go').onclick=async()=>{
   const dur=v.duration;
   if(!isFinite(dur)||dur<=0)return;
   if(dur>MAX_SECS){dst('This video is longer than 3 minutes. Trim it first, then try again.');return}
-  const free=dur<=FREE_SECS&&!$('#qfull').checked,blocks=Math.max(1,Math.ceil(dur/30));
+  const free=!$('#qfull').checked,len=expLen(),blocks=Math.max(1,Math.ceil(dur/30));
   if(!free){
     if(!sb||!user){dst('Full quality needs an account and credits. Sign in or sign up, then press Create again.');openAuth('in');return}
     await acct();
@@ -665,6 +676,7 @@ $('#go').onclick=async()=>{
     rec=true;frame();mr.start(1000);await v.play();loop();
     let last=-1,still=0;
     while(!ended){await sleep(250);
+      if(v.currentTime>=len-.05){v.pause();break}
       if(document.hidden){still=0;continue}
       if(Math.abs(v.currentTime-last)<.01){if(++still>40)throw new Error('stalled')}else{still=0;last=v.currentTime}
     }
@@ -675,7 +687,7 @@ $('#go').onclick=async()=>{
       let r=null;try{r=fmp4ToMp4(new Uint8Array(await blob.arrayBuffer()))}catch(e){r=null}
       if(r){blob=new Blob([r.bytes],{type:'video/mp4'});secs=r.duration}
     }
-    if(blob.size<20000||(secs!=null&&secs<dur-Math.max(1.5,dur*.08))){
+    if(blob.size<20000||(secs!=null&&secs<len-Math.max(1.5,len*.08))){
       dst('The video did not record completely, so nothing was saved and no credits were used. Keep the tab in front and try again.');return}
     if(!free){
       const r=await sb.rpc('spend_video',{p_blocks:blocks,p_ref:uid()});
@@ -683,7 +695,7 @@ $('#go').onclick=async()=>{
     }
     if(dlUrl)URL.revokeObjectURL(dlUrl);dlUrl=URL.createObjectURL(blob);
     const name='redacted.'+(isMp4?'mp4':'webm'),l=$('#dl');l.href=dlUrl;l.download=name;l.hidden=false;l.click();
-    dst('Done. Your video ('+fmt(secs||dur)+') was downloaded. If it did not start, use the Download button.');acct();
+    dst('Done. Your video ('+fmt(secs||len)+') was downloaded. If it did not start, use the Download button.');acct();
   }catch(e){dst('Something went wrong while creating the video, so no credits were used. Please try again.')}
   finally{
     rec=false;curMR=null;K=1;cv.width=v.videoWidth;cv.height=v.videoHeight;
