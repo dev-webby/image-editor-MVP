@@ -339,22 +339,23 @@ function faceCluster(dets,W,H,loose){
   return out;
 }
 const _tile=document.createElement('canvas');
-async function runFaces(src,deep,hints,loose,only,edge){      // src: canvas holding the picture
+async function runFaces(src,deep,hints,loose,only,edge,fast){      // src: canvas holding the picture
   const W=src.width,H=src.height,dets=[],mp=mpDet(),wins=faceWins(W,H,deep,hints,only);
   const em=edge?Math.round(Math.min(W,H)*.2):0;
   if(edge)wins.push([-em,-em,W+2*em,H+2*em,'p']);
   for(const[x,y,w,h,kind]of wins){
     let s=src,ox=0,oy=0;
     if(kind==='p'){          // frame with a border around it, so a face cut off by the edge still looks like a face
-      _tile.width=w;_tile.height=h;const g=_tile.getContext('2d');g.fillStyle='#808080';g.fillRect(0,0,w,h);
+      _tile.width=w;_tile.height=h;const g=_tile.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,w,h);
       g.drawImage(src,0,0,W,1,em,0,W,em);g.drawImage(src,0,H-1,W,1,em,em+H,W,em);
       g.drawImage(src,0,0,1,H,0,em,em,H);g.drawImage(src,W-1,0,1,H,em+W,em,em,H);
       g.drawImage(src,em,em);s=_tile;ox=-em;oy=-em;
     } else if(w<W||h<H){_tile.width=w;_tile.height=h;_tile.getContext('2d').drawImage(src,x,y,w,h,0,0,w,h);s=_tile;ox=x;oy=y}
-    if(ssd){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:loose===2?.2:loose?.35:.5,maxResults:40})))
-      dets.push({x:d.box.x+ox,y:d.box.y+oy,w:d.box.width,h:d.box.height,score:d.score,s:1})}catch(e){}}
-    if(mp&&(!ssd||kind!=='t')){try{for(const d of mp.detect(s).detections){const b=d.boundingBox;
-      dets.push({x:b.originX+ox,y:b.originY+oy,w:b.width,h:b.height,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}}catch(e){}}
+    const cut=kind==='t'||kind==='h'?(d=>{const r=3;return(d.x<r&&x>0)||(d.y<r&&y>0)||(d.x+d.w>w-r&&x+w<W)||(d.y+d.h>h-r&&y+h<H)}):()=>false;   // a face sliced by the edge of a crop is not a real find
+    if(ssd&&!fast){try{for(const d of await ssd.detectAllFaces(s,new ssd.SsdMobilenetv1Options({minConfidence:loose===2?.2:loose?.35:.5,maxResults:40})))
+      {const o={x:d.box.x,y:d.box.y,w:d.box.width,h:d.box.height};if(!cut(o))dets.push({x:o.x+ox,y:o.y+oy,w:o.w,h:o.h,score:d.score,s:1})}}catch(e){}}
+    if(mp&&(!ssd||fast||kind!=='t')){try{for(const d of mp.detect(s).detections){const b=d.boundingBox;
+      {const o={x:b.originX,y:b.originY,w:b.width,h:b.height};if(!cut(o))dets.push({x:o.x+ox,y:o.y+oy,w:o.w,h:o.h,score:d.categories&&d.categories[0]?d.categories[0].score:.5})}}}catch(e){}}
   }
   const out=faceCluster(dets,W,H,loose);
   if(edge)for(const b of out){const x1=Math.max(0,b.x),y1=Math.max(0,b.y),x2=Math.min(W,b.x+b.w),y2=Math.min(H,b.y+b.h);b.x=x1;b.y=y1;b.w=x2-x1;b.h=y2-y1}
@@ -419,7 +420,7 @@ async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();v.muted=true;setBusy(true);pg.hidden=false;pg.value=0;
-  const back=v.currentTime,dur=expLen(),fstep=Math.max(.3,dur/90),ostep=Math.max(1,dur/30),t00=performance.now();
+  const back=v.currentTime,dur=expLen(),fstep=Math.max(.4,dur/60),ostep=Math.max(1,dur/30),t00=performance.now();
   const notes=[],maxGap=2;MAXGAP=4;let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
@@ -457,7 +458,7 @@ async function scanAll(){
       await advanceTo(tg);const t=v.currentTime;
       if(useFaces){
         fcx.drawImage(v,0,0,fc.width,fc.height);
-        const found=await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true,false,i%2===0);addSample(ftracks,t,found,k1);
+        const found=i%2?await runFaces(fc,1,null,true,false,true,true):await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true,false,i%4===0);addSample(ftracks,t,found,k1);
         // a face that was tracked but not found this time: look again closely around where it was
         const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
         if(miss.length){const more=(await runFaces(fc,false,miss,2,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
@@ -639,6 +640,7 @@ document.addEventListener('visibilitychange',()=>{
   if(!rec||!curMR)return;
   if(document.hidden){v.pause();try{curMR.pause()}catch(e){}}else{try{curMR.resume()}catch(e){}v.play().then(loop)}
 });
+$('#dl').addEventListener('click',()=>{dst('Saving… the file redacted.'+($('#dl').download.split('.').pop())+' goes to your Downloads folder (watch your notifications). You can tap again if nothing appears.')});
 $('#go').onclick=async()=>{
   const dur=v.duration;
   if(!isFinite(dur)||dur<=0)return;
@@ -694,8 +696,8 @@ $('#go').onclick=async()=>{
       if(r.error||!r.data){dst('Your credits could not be used, so the video was not saved. Please try again.');return}
     }
     if(dlUrl)URL.revokeObjectURL(dlUrl);dlUrl=URL.createObjectURL(blob);
-    const name='redacted.'+(isMp4?'mp4':'webm'),l=$('#dl');l.href=dlUrl;l.download=name;l.hidden=false;l.click();
-    dst('Done. Your video ('+fmt(secs||len)+') was downloaded. If it did not start, use the Download button.');acct();
+    const name='redacted.'+(isMp4?'mp4':'webm'),l=$('#dl');l.href=dlUrl;l.download=name;l.hidden=false;l.textContent='Save video ('+fmt(secs||len)+')';try{l.scrollIntoView({block:'center'})}catch(e){}
+    dst('Your video is ready ('+fmt(secs||len)+'). Tap “Save video” below to download it.');acct();
   }catch(e){dst('Something went wrong while creating the video, so no credits were used. Please try again.')}
   finally{
     rec=false;curMR=null;K=1;cv.width=v.videoWidth;cv.height=v.videoHeight;
