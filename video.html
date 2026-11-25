@@ -164,7 +164,6 @@ if(sb)sb.auth.onAuthStateChange(()=>setTimeout(acct,0));
 $('#file').onchange=e=>{const f=e.target.files[0];e.target.value='';if(f)openVideo(f)};
 $('#new').onclick=()=>{v.pause();$('#file').click()};
 $('#clear').onclick=()=>{regions=regions.filter(r=>r.k!=='area');emptyOk=false;list();frame()};
-document.querySelectorAll('input[name=q]').forEach(r=>r.onchange=()=>{scanned=false});
 function expLen(){const d=v.duration;return(!$('#qfull').checked&&d>FREE_SECS)?FREE_SECS:d}
 function qualUI(){
   const w=v.videoWidth,h=v.videoHeight,d=v.duration,e=n=>n%2?n+1:n,kf=Math.min(1,FREE_H/Math.min(w,h)),kF=Math.min(1,1920/Math.max(w,h)),
@@ -333,6 +332,7 @@ function faceCluster(dets,W,H,loose){
     let sw=0,x=0,y=0,w=0,h=0;for(const d of c.m){sw+=d.score;x+=d.x*d.score;y+=d.y*d.score;w+=d.w*d.score;h+=d.h*d.score}
     const b={x:x/sw,y:y/sw,w:w/sw,h:h/sw,score:c.top.score,n:c.m.length},ar=b.w/b.h;
     if(ar<.55||ar>1.8||b.w<minS||b.h<minS||b.w*b.h>.7*W*H||(b.w*b.h>.4*W*H&&b.score<.8))continue;
+    if(ssd&&mpDet()&&b.w*b.h>.05*W*H&&b.score<.92&&!(c.m.some(d=>d.s)&&c.m.some(d=>!d.s)))continue;   // a big face must be agreed by both detectors
     if(loose){if(c.m.some(d=>d.s)?b.score>=(loose===2?.25:.35):b.score>=(loose===2?.4:.55))out.push(b)}
     else if(b.score>=hi||(c.m.length>=2&&b.score>=lo))out.push(b);
   }
@@ -373,9 +373,39 @@ function addSample(tracks,t,boxes,k1){
   const thumb=(q,b)=>{const c=q.thumb||(q.thumb=document.createElement('canvas'));c.width=c.height=48;
     c.getContext('2d').drawImage(fc,Math.max(0,b.x),Math.max(0,b.y),b.w,b.h,0,0,48,48)};
   for(const c of cand){if(ub.has(c.bi)||uq.has(c.qi))continue;ub.add(c.bi);uq.add(c.qi);
-    const q=open[c.qi],b=boxes[c.bi];q.kf.push({t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1});q.lastT=t;q.n++;q.sum+=b.score;
+    const q=open[c.qi],b=boxes[c.bi];if(q.kf[q.kf.length-1].t===t)q.kf.pop();q.kf.push({t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1});q.lastT=t;q.n++;q.sum+=b.score;
     if(b.score>q.best){q.best=b.score;thumb(q,b)}}
   boxes.forEach((b,bi)=>{if(ub.has(bi))return;const q={kf:[{t,x:b.x/k1,y:b.y/k1,w:b.w/k1,h:b.h/k1}],lastT:t,n:1,best:b.score,sum:b.score};thumb(q,b);tracks.push(q)});
+}
+
+// ---- cheap follow-up between detections: finds the saved picture of a face again in the next frame ----
+const TG={c:document.createElement('canvas')};
+function grabGray(){
+  const W=v.videoWidth,H=v.videoHeight,s=Math.min(1,480/Math.max(W,H)),w=Math.round(W*s),h=Math.round(H*s),c=TG.c;
+  if(c.width!==w||c.height!==h){c.width=w;c.height=h;TG.x=c.getContext('2d',{willReadFrequently:true})}
+  TG.x.drawImage(v,0,0,w,h);const p=TG.x.getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+  for(let i=0,j=0;j<g.length;i+=4,j++)g[j]=(p[i]*77+p[i+1]*150+p[i+2]*29)>>8;
+  return{g,w,h,s};
+}
+function cropTpl(G,x,y,w,h){
+  x=Math.max(0,Math.round(x));y=Math.max(0,Math.round(y));w=Math.min(G.w-x,Math.round(w));h=Math.min(G.h-y,Math.round(h));
+  if(w<10||h<10)return null;
+  const a=[];let s=0,s2=0;for(let j=0;j<h;j+=2)for(let i=0;i<w;i+=2){const q=G.g[(y+j)*G.w+x+i];a.push(q);s+=q;s2+=q*q}
+  return{w,h,a:Int16Array.from(a),n:a.length,s,vt:s2-s*s/a.length};
+}
+function nccAt(G,T,px,py){
+  let si=0,si2=0,sit=0,k=0;
+  for(let j=0;j<T.h;j+=2){let o=(py+j)*G.w+px;for(let i=0;i<T.w;i+=2,o+=2,k++){const q=G.g[o];si+=q;si2+=q*q;sit+=q*T.a[k]}}
+  const vi=si2-si*si/T.n;if(vi<T.n*6||T.vt<T.n*6)return -1;
+  return(sit-si*T.s/T.n)/Math.sqrt(vi*T.vt);
+}
+function findTpl(G,T,cx,cy,r){
+  const xa=Math.max(0,cx-r),xb=Math.min(G.w-T.w,cx+r),ya=Math.max(0,cy-r),yb=Math.min(G.h-T.h,cy+r);
+  let best=-1,bx=cx,by=cy;
+  for(let y=ya;y<=yb;y+=2)for(let x=xa;x<=xb;x+=2){const q=nccAt(G,T,x,y);if(q>best){best=q;bx=x;by=y}}
+  const cx0=bx,cy0=by;
+  for(let y=Math.max(ya,cy0-1);y<=Math.min(yb,cy0+1);y++)for(let x=Math.max(xa,cx0-1);x<=Math.min(xb,cx0+1);x++){const q=nccAt(G,T,x,y);if(q>best){best=q;bx=x;by=y}}
+  return{x:bx,y:by,s:best};
 }
 
 // ---- text helpers ----
@@ -420,8 +450,8 @@ async function scanAll(){
   const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();v.muted=true;setBusy(true);pg.hidden=false;pg.value=0;
-  const back=v.currentTime,dur=expLen(),fstep=Math.max(.4,dur/60),ostep=Math.max(1,dur/30),t00=performance.now();
-  const notes=[],maxGap=2;MAXGAP=4;let worker=null,ok=true;
+  const back=v.currentTime,dur=v.duration,fstep=Math.max(.25,dur/120),ostep=Math.max(1,dur/30),t00=performance.now();
+  const notes=[],maxGap=2;MAXGAP=6;let worker=null,ok=true;
   const ftracks=[],tt=[];
   try{
     let useFaces=wantFaces;
@@ -435,6 +465,7 @@ async function scanAll(){
     const sm=document.createElement('canvas');sm.width=SW;sm.height=SH;const sx=sm.getContext('2d',{willReadFrequently:true});
     const times=[];for(let t=0;t<dur-.05;t+=fstep)times.push(t);if(!times.length)times.push(0);
     const jobs=[],maxWait=Math.max(1.2,ostep*1.2),EPS=.0008;
+    let prevG=null,lastKey=-1,lastDeep=-1,kidx=0;const KEYGAP=1.8;
     let lastSig=null,ocrSig=null,curJob=null,lastOcrT=-9,chain=Promise.resolve();
     const wordsOf=data=>{const out=[];
       const take=w=>{if(w.text&&w.text.trim()&&w.confidence>=25)out.push({text:w.text,x0:w.bbox.x0,y0:w.bbox.y0,x1:w.bbox.x1,y1:w.bbox.y1,conf:w.confidence})};
@@ -457,11 +488,31 @@ async function scanAll(){
       st.textContent='Scanning the video… '+Math.round(i/times.length*100)+'%'+(eta?' · about '+(eta>90?Math.round(eta/60)+' min':eta+' s')+' left':'');
       await advanceTo(tg);const t=v.currentTime;
       if(useFaces){
-        fcx.drawImage(v,0,0,fc.width,fc.height);
-        const found=i%2?await runFaces(fc,1,null,true,false,true,true):await runFaces(fc,!ssd?1:i%8===0?2:i%4===0?1:0,null,true,false,i%4===0);addSample(ftracks,t,found,k1);
-        // a face that was tracked but not found this time: look again closely around where it was
-        const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=maxGap&&q.n>=2).slice(0,3).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
-        if(miss.length){const more=(await runFaces(fc,false,miss,2,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
+        // 1) follow the faces we already know, using the picture saved from the last detection
+        const G=grabGray();let cut=false,md=0;
+        if(prevG&&prevG.w===G.w&&prevG.h===G.h){let d=0,c=0;for(let j=0;j<G.g.length;j+=7,c++)d+=Math.abs(G.g[j]-prevG.g[j]);md=d/c;cut=md>38}
+        prevG=G;
+        for(const q of ftracks){if(q.dead||!q.tpl)continue;const a=q.kf[q.kf.length-1];
+          for(const o of ftracks){if(o===q||o.dead||!o.tpl)continue;const b=o.kf[o.kf.length-1];
+            if(contain(a,b)>.7&&contain(b,a)>.7&&(o.n<q.n||(o.n===q.n&&o.best<q.best)))o.dead=true}}
+        for(const q of ftracks){
+          if(!q.tpl||q.dead||cut)continue;
+          const l=q.kf[q.kf.length-1],r=Math.round(Math.max(8,q.tpl.w*(.7+.35*Math.min(3,q.lost||0))));
+          const m=findTpl(G,q.tpl,Math.round(l.x*G.s),Math.round(l.y*G.s),r);
+          if(m.s>=.62){q.lost=0;if(l.t===t)q.kf.pop();q.kf.push({t,x:m.x/G.s,y:m.y/G.s,w:q.tpl.w/G.s,h:q.tpl.h/G.s});if(m.s>=.7){const T2=cropTpl(G,m.x,m.y,q.tpl.w,q.tpl.h);if(T2)q.tpl=T2}}
+          else if(++q.lost>=5)q.dead=true;
+        }
+        // 2) every couple of seconds (and at a cut), look properly with the detectors
+        // a busy picture, or a face we just lost, gets a quick full look every step; a calm one only every couple of seconds
+        const busy=md>5||ftracks.some(q=>!q.dead&&q.tpl&&q.lost>0&&t-q.lastT<6);
+        if(cut||lastKey<0||t-lastKey>=(busy?.3:KEYGAP)-.01){
+          lastKey=t;fcx.drawImage(v,0,0,fc.width,fc.height);
+          const deepNow=lastDeep<0||cut||t-lastDeep>=KEYGAP-.01;if(deepNow)lastDeep=t;
+          const found=await runFaces(fc,!ssd?1:deepNow?(kidx%3===0?2:1):0,null,true,false,deepNow);if(deepNow)kidx++;addSample(ftracks,t,found,k1);
+          const miss=ftracks.filter(q=>q.lastT<t&&t-q.lastT<=6&&q.n>=2).slice(0,6).map(q=>{const l=q.kf[q.kf.length-1];return{x:l.x*k1,y:l.y*k1,w:l.w*k1,h:l.h*k1}});
+          if(miss.length){const more=(await runFaces(fc,false,miss,2,true)).filter(b=>!found.some(f=>iou(f,b)>.3));if(more.length)addSample(ftracks,t,more,k1)}
+          for(const q of ftracks)if(q.lastT===t){const l=q.kf[q.kf.length-1],T=cropTpl(G,l.x*G.s,l.y*G.s,l.w*G.s,l.h*G.s);if(T){q.tpl=T;q.lost=0;q.dead=false}}
+        }
       }
       if(useText){
         // Read the text when the picture has settled after a change, and whenever it has kept moving for a while.
