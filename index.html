@@ -121,6 +121,8 @@ dialog h2{margin:0 0 8px}dialog input{margin:6px 0}
    <label><input type="checkbox" class="cat" value="email" checked> Emails</label>
    <label><input type="checkbox" class="cat" value="phone" checked> Phone numbers</label>
    <label><input type="checkbox" class="cat" value="card" checked> Card numbers</label>
+   <label><input type="checkbox" class="cat" value="id" checked> ID numbers (NIN, BVN)</label>
+   <label><input type="checkbox" class="cat" value="qr" checked> QR codes</label>
    <label><input type="checkbox" class="cat" value="url"> Links</label>
    <label><input type="checkbox" class="cat" value="face"> Faces</label>
   </div>
@@ -412,7 +414,7 @@ async function ocrWords(canvas,psm){
 }
 function pushHit(h){
   const b=TF.bounds(h.q),tilt=h.q.some((p,i)=>{const n=h.q[(i+1)%4];return Math.abs(p[0]-n[0])>1.5&&Math.abs(p[1]-n[1])>1.5});
-  regions.push({x:b.x,y:b.y,w:b.w,h:b.h,label:h.cat,on:true,q:tilt?h.q:null});
+  regions.push({x:b.x,y:b.y,w:b.w,h:b.h,label:h.cat==='id'?'ID number':h.cat,on:true,q:tilt?h.q:null});
 }
 async function runScan(deep){
   const st=$('#st'),on=[...document.querySelectorAll('.cat:checked')].map(c=>c.value);
@@ -421,10 +423,13 @@ async function runScan(deep){
   $('#scan').disabled=$('#deep').disabled=true;
   let msg='';
   try{
-    const cats=on.filter(k=>k!=='face');
+    const cats=on.filter(k=>k!=='face'&&k!=='qr');
     if(cats.length){
       const hits=await TF.scan(img,cats,ocrWords,{sweep:deep,progress:(i,n,a)=>{st.textContent='Reading text… step '+(i+1)+' of '+n+(a?' (straightening a tilted photo)':'')}});
       hits.forEach(pushHit);
+    }
+    if(on.includes('qr')){
+      try{st.textContent='Looking for QR codes…';(await TF.qr(img)).forEach(b=>regions.push({x:b.x,y:b.y,w:b.w,h:b.h,label:'QR code',on:true}))}catch(e){}
     }
     if(on.includes('face')){
       try{

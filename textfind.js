@@ -9,6 +9,8 @@ const TLDS = new Set('com net org edu gov co ng uk io me info biz us ke gh za in
 const RE_A = /[A-Za-z0-9._%+\-]+\s?@\s?[A-Za-z0-9\-]+(?:\s?\.\s?[A-Za-z0-9\-]{2,}){1,4}/g;
 const RE_B = new RegExp('[A-Za-z0-9._%+\\-]*\\s?[@©®]\\s?(?:' + PROV + ')\\s?[. ,]\\s?(?:com|net|org|ng|co)\\b', 'gi');
 const RE_C = new RegExp('[A-Za-z0-9._%+\\-]{3,}(?:' + PROV + ')\\s?[.,]\\s?(?:com|net|org|ng|co)\\b', 'gi');
+// shortened by the app with "..." (mosesprecious907@gmail...) or cut off before the ending
+const RE_D = new RegExp('[A-Za-z0-9._%+\\-]{3,}\\s?@\\s?(?:(?:' + PROV + ')\\b(?:\\s?[.,…]{1,3})?|[A-Za-z0-9\\-]{2,}\\s?(?:\\.{2,}|…))', 'gi');
 const RE_URL = /(?:https?:\/\/|www\.)\S+/gi;
 const RE_NUM = /[+(]?\d[\d\s().\-*]{6,}\d/g;
 
@@ -59,6 +61,13 @@ const strip = w => w.replace(/^[\s:;,.\-]+|[\s:;,.\-]+$/g, '');
 /* words: [{text,x0,y0,x1,y1,conf}] in reading order for ONE line.
    cats: ['email','phone','card','url'] (the ones switched on).
    Returns [{cat, i, j}] word index ranges (inclusive) that should be hidden. */
+/* Flatten a canvas to plain grey. The text reader finds digits on coloured cards much more reliably this way. */
+TF.gray = function (c) {
+  const x = c.getContext('2d', { willReadFrequently: true }), d = x.getImageData(0, 0, c.width, c.height), p = d.data;
+  for (let i = 0; i < p.length; i += 4) { const v = (p[i] * 77 + p[i + 1] * 150 + p[i + 2] * 29) >> 8; p[i] = p[i + 1] = p[i + 2] = v; p[i + 3] = 255; }
+  x.putImageData(d, 0, 0); return c;
+};
+
 TF.matches = function (words, cats) {
   const want = k => cats.indexOf(k) >= 0, out = [];
   if (!words.length) return out;
@@ -74,7 +83,7 @@ TF.matches = function (words, cats) {
 
   const emailR = [];
   if (want('email')) {
-    for (const re of [RE_A, RE_B, RE_C]) {
+    for (const re of [RE_A, RE_B, RE_C, RE_D]) {
       re.lastIndex = 0;
       let m;
       while ((m = re.exec(t))) {
@@ -96,7 +105,7 @@ TF.matches = function (words, cats) {
   }
   const inEmail = (a, b) => emailR.some(r => a < r[1] && b > r[0]);
   const t2 = fixDigits(t);
-  if (want('phone') || want('card')) {
+  if (want('phone') || want('card') || want('id')) {
     RE_NUM.lastIndex = 0;
     let m;
     while ((m = RE_NUM.exec(t2))) {
@@ -106,7 +115,10 @@ TF.matches = function (words, cats) {
       let cat = null;
       const nigerian = /^(?:234[789]\d{9}|0[789]\d{9})$/.test(digits);
       const grouped4 = /^\d{4}[\s\-]+\d{4}[\s\-]+\d{4}([\s\-]+\d{1,4})?$/.test(s);
-      if (stars > 0) cat = total >= 10 ? 'card' : null;
+      // NIN and BVN are 11 digits. A Nigerian mobile number is also 11 digits, but starts 07/08/09.
+      if (!stars && !nigerian && s.charAt(0) !== '+' && /^\d{3,4}\s\d{3}\s\d{4}$/.test(s) && (digits.length === 10 || digits.length === 11)) cat = want('id') ? 'id' : 'phone';
+      else if (!stars && digits.length === 11 && !nigerian && s.charAt(0) !== '+' && !/^(\d)\1+$/.test(digits)) cat = want('id') ? 'id' : 'phone';
+      else if (stars > 0) cat = total >= 10 ? 'card' : null;
       else if (nigerian || s.charAt(0) === '+') cat = digits.length >= 9 && digits.length <= 15 ? 'phone' : null;
       else if (grouped4 || (digits.length >= 13 && digits.length <= 19)) cat = 'card';
       else if (digits.length >= 9 && digits.length <= 15) cat = 'phone';
@@ -118,6 +130,7 @@ TF.matches = function (words, cats) {
       let cat = null;
       if (/^(phone|tel|telephone|mobile|mob|whatsapp|cell|gsm)$/i.test(w)) cat = 'phone';
       else if (/^(card|account|acct|a\/c|iban|pan|nuban)$/i.test(w)) cat = 'card';
+      else if (/^(nin|vnin|bvn|nimc|nin-slip)$/i.test(w)) cat = 'id';
       if (!cat || !want(cat)) continue;
       let v = k + 1;
       while (v < words.length && FILL.test(strip(words[v].text))) v++;
@@ -240,6 +253,56 @@ TF.area = polyArea;
 
 /* Scan a picture. ocr(canvas, psm) must return a Promise of [{text,x0,y0,x1,y1,conf}].
    Returns [{cat, q:[[x,y]x4], text}] in picture coordinates. */
+
+/* QR codes and barcodes. Uses the browser's own detector when it has one, and a small library otherwise.
+   Returns [{x,y,w,h}] in the picture's own pixels. */
+let jsqrP = null;
+function loadJsQR() {
+  if (g.jsQR) return Promise.resolve(g.jsQR);
+  if (!jsqrP) jsqrP = new Promise(res => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+    s.onload = () => res(g.jsQR || null); s.onerror = () => res(null);
+    document.head.appendChild(s);
+  });
+  return jsqrP;
+}
+TF.qr = async function (src, opts) {
+  opts = opts || {};
+  const W = src.width || src.naturalWidth, H = src.height || src.naturalHeight;
+  const k = Math.min(1, (opts.max || 2000) / Math.max(W, H)), w = Math.max(8, Math.round(W * k)), h = Math.max(8, Math.round(H * k));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, 0, 0, w, h);
+  const out = [];
+  const add = (bx, by, bw, bh) => {
+    const p = Math.max(bw, bh) * 0.06;
+    const r = { x: (bx - p) / k, y: (by - p) / k, w: (bw + 2 * p) / k, h: (bh + 2 * p) / k };
+    const same = o => { const iw = Math.min(o.x + o.w, r.x + r.w) - Math.max(o.x, r.x), ih = Math.min(o.y + o.h, r.y + r.h) - Math.max(o.y, r.y); return iw > 0 && ih > 0 && iw * ih > 0.4 * Math.min(o.w * o.h, r.w * r.h); };
+    if (!out.some(same)) out.push(r);
+  };
+  if (typeof BarcodeDetector !== 'undefined') {
+    try {
+      const bd = new BarcodeDetector();
+      for (const b of await bd.detect(c)) { const q = b.boundingBox; add(q.x, q.y, q.width, q.height); }
+    } catch (e) { /* not supported for this format list: fall through to the library */ }
+  }
+  const J = await loadJsQR();
+  if (J) {
+    // find one code at a time, blank it out, look again
+    for (let n = 0; n < 8; n++) {
+      const d = x.getImageData(0, 0, w, h);
+      const r = await J(d.data, w, h, { inversionAttempts: 'attemptBoth' });
+      if (!r) break;
+      const L = r.location, xs = [L.topLeftCorner.x, L.topRightCorner.x, L.bottomLeftCorner.x, L.bottomRightCorner.x],
+        ys = [L.topLeftCorner.y, L.topRightCorner.y, L.bottomLeftCorner.y, L.bottomRightCorner.y];
+      const x0 = Math.min(...xs), y0 = Math.min(...ys), x1 = Math.max(...xs), y1 = Math.max(...ys);
+      add(x0, y0, x1 - x0, y1 - y0);
+      x.fillStyle = '#808080'; x.fillRect(x0 - 4, y0 - 4, x1 - x0 + 8, y1 - y0 + 8);
+    }
+  }
+  return out;
+};
+
 TF.scan = async function (src, cats, ocr, opts) {
   opts = opts || {};
   const prog = opts.progress || function () {};
@@ -257,6 +320,7 @@ TF.scan = async function (src, cats, ocr, opts) {
     prog(pi, passes.length, a);
     const rot = TF.rotate(src, a, s, dark);
     let words = [];
+    if (!g.__noGray) TF.gray(rot.c);
     try { words = await ocr(rot.c, psm); } catch (e) { if (pi === 0) throw e; }
     for (const row of TF.rows(words)) {
       for (const m of TF.matches(row, cats)) {

@@ -97,6 +97,8 @@ footer{border-top:1px solid var(--bd);text-align:center;color:var(--mu);padding:
    <label><input type="checkbox" class="cat" value="email" checked> Emails</label>
    <label><input type="checkbox" class="cat" value="phone" checked> Phone numbers</label>
    <label><input type="checkbox" class="cat" value="card" checked> Card numbers</label>
+   <label><input type="checkbox" class="cat" value="id" checked> ID numbers (NIN, BVN)</label>
+   <label><input type="checkbox" class="cat" value="qr" checked> QR codes</label>
    <label><input type="checkbox" class="cat" value="url"> Links</label>
    <label><input type="checkbox" class="cat" id="faces" value="face" checked> Faces</label>
   </div>
@@ -124,7 +126,7 @@ const $=s=>document.querySelector(s),cv=$('#cv'),ctx=cv.getContext('2d'),tc=docu
 const v=document.createElement('video');v.playsInline=true;v.setAttribute('playsinline','');v.preload='auto';
 let vLeft=0,curMove=null,reloading=false,vErr=false,regions=[],drag=null,K=1,fd=null,rec=false,busy=false,aud=null,user=null,scanned=false,emptyOk=false,curMR=null,dlUrl=null;
 const FREE_SECS=15,FREE_H=480,MAX_SECS=180;
-const RX={email:/[\w.+-]+@[\w-]+\.[\w.-]+/g,phone:/\+?\d[\d\s().-]{7,}\d/g,card:/\b(?:\d[ -]?){13,19}\b/g,url:/(?:https?:\/\/|www\.)\S+/gi};
+const RX={email:/[\w.+-]+@[\w-]+\.[\w.-]+/g,phone:/\+?\d[\d\s().-]{7,}\d/g,card:/\b(?:\d[ -]?){13,19}\b/g,id:/\d{11}/g,url:/(?:https?:\/\/|www\.)\S+/gi};
 const CFG=window.APP_CONFIG||{};
 let sb=null;try{sb=(CFG.supabaseUrl||'').startsWith('https://')&&window.supabase?supabase.createClient(CFG.supabaseUrl,CFG.supabaseKey):null}catch(e){}
 const mode=()=>document.querySelector('[name=m]:checked').value,str=()=>+$('#str').value;
@@ -387,16 +389,16 @@ function addSample(tracks,t,boxes,k1){
 
 // ---- cheap follow-up between detections: finds the saved picture of a face again in the next frame ----
 const TG={c:document.createElement('canvas')};
-function grabGray(){
-  const W=v.videoWidth,H=v.videoHeight,s=Math.min(1,480/Math.max(W,H)),w=Math.round(W*s),h=Math.round(H*s),c=TG.c;
-  if(c.width!==w||c.height!==h){c.width=w;c.height=h;TG.x=c.getContext('2d',{willReadFrequently:true})}
-  TG.x.drawImage(v,0,0,w,h);const p=TG.x.getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+function grabGray(sc){
+  const W=v.videoWidth,H=v.videoHeight,s=sc||Math.min(1,480/Math.max(W,H)),w=Math.round(W*s),h=Math.round(H*s),c=sc?(TG.c2||(TG.c2=document.createElement('canvas'))):TG.c,K=sc?'x2':'x';
+  if(c.width!==w||c.height!==h){c.width=w;c.height=h;TG[K]=c.getContext('2d',{willReadFrequently:true})}
+  TG[K].drawImage(v,0,0,w,h);const p=TG[K].getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
   for(let i=0,j=0;j<g.length;i+=4,j++)g[j]=(p[i]*77+p[i+1]*150+p[i+2]*29)>>8;
   return{g,w,h,s};
 }
 function cropTpl(G,x,y,w,h){
   x=Math.max(0,Math.round(x));y=Math.max(0,Math.round(y));w=Math.min(G.w-x,Math.round(w));h=Math.min(G.h-y,Math.round(h));
-  if(w<10||h<10)return null;
+  if(w<8||h<8)return null;
   const a=[];let s=0,s2=0;for(let j=0;j<h;j+=2)for(let i=0;i<w;i+=2){const q=G.g[(y+j)*G.w+x+i];a.push(q);s+=q;s2+=q*q}
   return{w,h,a:Int16Array.from(a),n:a.length,s,vt:s2-s*s/a.length};
 }
@@ -415,13 +417,31 @@ function findTpl(G,T,cx,cy,r){
   return{x:bx,y:by,s:best};
 }
 
+// follow a piece of text through the saved frames (the camera may be moving) until it stops matching
+function followBox(frames,i0,i1,step,box,T){
+  const out=[];let cur={x:box.x,y:box.y},miss=0;
+  for(let i=i0;i!==i1;i+=step){
+    if(step>0?(i!==i0&&frames[i].cut):(i+1<frames.length&&frames[i+1].cut))break;   // the picture changed completely: stop
+    const G=frames[i].G,px=Math.round(cur.x*G.s),py=Math.round(cur.y*G.s);let s=-1;
+    if(px>=0&&py>=0&&px+T.w<=G.w&&py+T.h<=G.h){
+      let m={x:px,y:py,s:nccAt(G,T,px,py)};
+      if(m.s<.92)m=findTpl(G,T,px,py,Math.round(Math.max(8,G.w*.12)));
+      s=m.s;if(s>=.6){cur={x:m.x/G.s,y:m.y/G.s};if(s<.9&&s>=.7){const T2=cropTpl(G,m.x,m.y,T.w,T.h);if(T2)T=T2}}   // follow slow changes of size and light
+    }
+    if(s>=.6)miss=0;else if(++miss>=2)break;
+    out.push({t:frames[i].t,x:cur.x,y:cur.y,w:box.w,h:box.h,ok:s>=.6});
+  }
+  while(out.length&&!out[out.length-1].ok)out.pop();
+  return out;
+}
 // ---- text helpers ----
 const luhn=s=>{let n=0;for(let i=s.length-1,d=0;i>=0;i--,d++){let x=+s[i];if(d%2){x*=2;if(x>9)x-=9}n+=x}return n%10===0};
 function okHit(k,txt){
   const dg=txt.replace(/\D/g,'');
   if(k==='card')return dg.length>=13&&dg.length<=19&&(luhn(dg)||/\d{4}[ -]\d{4}/.test(txt));
   if(k==='phone')return dg.length>=8&&dg.length<=15&&!/^(\d)\1+$/.test(dg);
-  if(k==='email')return /@[\w-]+\.[a-z]{2,}/i.test(txt);
+  if(k==='id')return dg.length===11&&!/^(\d)\1+$/.test(dg)&&!/^0[789]/.test(dg);
+  if(k==='email')return /@\s?[\w-]+(?:\.[a-z]{2,}|\s?(?:\.{2,}|…)|$)/i.test(txt);
   return true;
 }
 function invert(c,x){const d=x.getImageData(0,0,c.width,c.height),p=d.data;for(let i=0;i<p.length;i+=4){p[i]=255-p[i];p[i+1]=255-p[i+1];p[i+2]=255-p[i+2]}x.putImageData(d,0,0)}
@@ -438,7 +458,7 @@ async function recover(t){           // phones sometimes drop the video decoder;
 async function advanceTo(t,tries=0){
   try{
     if(vErr||v.error)throw new Error('decoder');
-    if(!v.requestVideoFrameCallback||t<v.currentTime-.01||t-v.currentTime>2){await seekTo(t)}
+    if(!v.requestVideoFrameCallback||t<v.currentTime-.7||t-v.currentTime>2){await seekTo(t)}
     else if(t-v.currentTime>.02){
       v.playbackRate=1;await v.play();
       await new Promise(res=>{let d=false;const fin=()=>{if(!d){d=true;res()}};
@@ -454,7 +474,7 @@ async function advanceTo(t,tries=0){
   await new Promise(r=>requestAnimationFrame(()=>r()));
 }
 async function scanAll(){
-  const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked;
+  const st=$('#st'),pg=$('#pg'),texts=[...document.querySelectorAll('.cat:checked')].map(c=>c.value).filter(k=>RX[k]),wantFaces=$('#faces').checked,wantQR=!!document.querySelector('.cat[value=qr]:checked');
   if(!texts.length&&!wantFaces){st.textContent='Pick at least one type to look for.';return false}
   v.pause();v.muted=true;setBusy(true);pg.hidden=false;pg.value=0;
   const back=v.currentTime,dur=v.duration,fstep=Math.max(.25,dur/120),ostep=Math.max(1,dur/30),t00=performance.now();
@@ -463,15 +483,16 @@ async function scanAll(){
   try{
     let useFaces=wantFaces;
     if(useFaces){st.textContent='Loading the face finder…';if(!await initFaces()){useFaces=false;notes.push('The face finder could not load (needs internet the first time), so faces were not scanned. Draw over faces by hand.')}}
-    let useText=texts.length>0;
-    if(useText){st.textContent='Loading the text reader…';try{worker=await Tesseract.createWorker('eng')}catch(e){useText=false;notes.push('The text reader could not load, so text was not scanned.')}}
+    let useText=texts.length>0||wantQR;
+    if(useText&&texts.length){st.textContent='Loading the text reader…';try{worker=await Tesseract.createWorker('eng')}catch(e){useText=wantQR;notes.push('The text reader could not load, so text was not scanned.')}}
     if(!useFaces&&!useText){st.textContent=notes.join(' ');ok=false;return false}
     const k1=Math.min(1,1280/Math.max(v.videoWidth,v.videoHeight));fc.width=Math.round(v.videoWidth*k1);fc.height=Math.round(v.videoHeight*k1);
-    const k0=Math.min(1.6,1600/Math.max(v.videoWidth,v.videoHeight));   // size the text reader sees (small videos are enlarged)
+    const k0=Math.min(2.5,1600/Math.max(v.videoWidth,v.videoHeight));   // size the text reader sees (small videos are enlarged)
     const SW=160,SH=Math.max(8,Math.round(SW*v.videoHeight/v.videoWidth));
     const sm=document.createElement('canvas');sm.width=SW;sm.height=SH;const sx=sm.getContext('2d',{willReadFrequently:true});
     const times=[];for(let t=0;t<dur-.05;t+=fstep)times.push(t);if(!times.length)times.push(0);
     const jobs=[],maxWait=Math.max(1.2,ostep*1.2),EPS=.0008;
+    const frames=[],gsc=Math.min(.6,Math.sqrt(60e6/Math.max(1,times.length)/(v.videoWidth*v.videoHeight)));
     let prevG=null,lastKey=-1,lastDeep=-1,kidx=0;const KEYGAP=1.8;
     let lastSig=null,ocrSig=null,curJob=null,lastOcrT=-9,chain=Promise.resolve();
     const wordsOf=data=>{const out=[];
@@ -488,7 +509,14 @@ async function scanAll(){
       all.sort((a,b)=>b.len-a.len);const keep=[];
       for(const h of all)if(!keep.some(q=>q.k===h.k&&contain(q,h)>.6))keep.push(h);
       return keep};
-    const runOcr=(oc,sparse)=>{const p=chain.then(async()=>{const a=await recog(oc,3);let b=[];if(sparse){try{b=await recog(oc,11)}catch(e){}}return hitsOf([a,b])}).catch(()=>[]);chain=p;return p};
+    const runOcr=(oc,sparse)=>{const p=chain.then(async()=>{let hits=[];
+      if(worker&&texts.length){const a=await recog(oc,3);let b=[],c=[];if(sparse){try{b=await recog(oc,11)}catch(e){}}
+        // big print (cards held to the camera) reads far better when shrunk to about half size
+        try{const hs=document.createElement('canvas');hs.width=Math.round(oc.width/2);hs.height=Math.round(oc.height/2);const hx=hs.getContext('2d');hx.imageSmoothingQuality='high';hx.drawImage(oc,0,0,hs.width,hs.height);
+          c=(await recog(hs,11)).map(w=>({...w,x0:w.x0*2,y0:w.y0*2,x1:w.x1*2,y1:w.y1*2}))}catch(e){}
+        hits=hitsOf([a,b,c])}
+      if(wantQR){try{(await TF.qr(oc,{max:1100})).forEach(q=>hits.push({k:'qr',len:1,x:q.x/k0,y:q.y/k0,w:q.w/k0,h:q.h/k0}))}catch(e){}}
+      return hits}).catch(()=>[]);chain=p;return p};
     for(let i=0;i<times.length;i++){
       const tg=times[i];pg.value=i/times.length;
       const el=(performance.now()-t00)/1000,eta=i>3?Math.round(el/i*(times.length-i)):0;
@@ -531,23 +559,40 @@ async function scanAll(){
         else if(!curJob||dPrev<=EPS||t-lastOcrT>=maxWait){
           if(jobs.length>=3)await jobs[jobs.length-3].p;
           const oc=document.createElement('canvas');oc.width=Math.round(v.videoWidth*k0);oc.height=Math.round(v.videoHeight*k0);
-          const ox=oc.getContext('2d',{willReadFrequently:true});ox.imageSmoothingQuality='high';ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);
-          const job={tA:curJob?curJob.tB:0,tB:t+fstep/2,p:runOcr(oc,jobs.length<40)};
+          const ox=oc.getContext('2d',{willReadFrequently:true});ox.imageSmoothingQuality='high';ox.drawImage(v,0,0,oc.width,oc.height);if(mean<110)invert(oc,ox);TF.gray(oc);
+          const job={tA:curJob?curJob.tB:0,tB:t+fstep/2,tc:t,p:runOcr(oc,jobs.length<40)};
           jobs.push(job);curJob=job;ocrSig=sig;lastOcrT=t;
         }
         lastSig=sig;
+        {const G2=grabGray(gsc),pf=frames[frames.length-1];let cutF=false;
+          if(pf&&pf.G.w===G2.w&&pf.G.h===G2.h){let d=0,c=0;for(let j=0;j<G2.g.length;j+=9,c++)d+=Math.abs(G2.g[j]-pf.G.g[j]);cutF=d/c>22}
+          frames.push({t,G:G2,cut:cutF})}
       }
     }
-    let prevJ=-1;
+    frames.sort((a,b)=>a.t-b.t);for(let i=frames.length-1;i>0;i--)if(frames[i].t-frames[i-1].t<.01)frames.splice(i,1);
+    st.textContent='Following the text through the video…';
+    const nearBox=(q,t)=>{let best=null,bd=.16;for(const p of q.kf){const d=Math.abs(p.t-t);if(d<bd){bd=d;best=p}}return best};
     for(let ji=0;ji<jobs.length;ji++){
-      const j=jobs[ji],hits=await j.p,ta=Math.max(0,j.tA-.12),tb=j.tB+.12;
-      hits.forEach(h=>{
-        const tr=tt.find(q=>q.k===h.k&&q.lastJ===prevJ&&iou(q,h)>.5);
-        if(tr){const x1=Math.min(tr.x,h.x),y1=Math.min(tr.y,h.y),x2=Math.max(tr.x+tr.w,h.x+h.w),y2=Math.max(tr.y+tr.h,h.y+h.h);
-          Object.assign(tr,{x:x1,y:y1,w:x2-x1,h:y2-y1,lastJ:ji,t1:tb,n:tr.n+1})}
-        else tt.push({...h,lastJ:ji,t0:ta,t1:tb,n:1});
-      });
-      prevJ=ji;
+      const j=jobs[ji],hits=await j.p,ta=Math.max(0,j.tA-.12),tb=Math.min(dur,j.tB+.12);
+      let ic=frames.findIndex(f=>f.t>=j.tc-1e-3);if(ic<0)ic=frames.length-1;
+      for(const h of hits){
+        const have=tt.find(q=>q.k===h.k&&(b=>b&&iou(b,h)>.45)(nearBox(q,j.tc)));
+        if(have){have.n++;continue}
+        const stat=[{t:ta,x:h.x,y:h.y,w:h.w,h:h.h},{t:tb,x:h.x,y:h.y,w:h.w,h:h.h}];
+        let kf=stat;const fr=frames[ic];
+        if(fr){
+          const T=cropTpl(fr.G,h.x*fr.G.s,h.y*fr.G.s,h.w*fr.G.s,h.h*fr.G.s);
+          if(T){
+            const fwd=followBox(frames,ic,frames.length,1,h,T),back=followBox(frames,ic-1,-1,-1,h,T).reverse();
+            const tr=back.concat(fwd).sort((a,b)=>a.t-b.t).filter((p,i,a)=>!i||p.t-a[i-1].t>.01);
+            if(tr.length){kf=tr;
+              // the reading itself covers its own moment even if the match is weak there
+              if(kf[0].t>ta)kf.unshift({t:ta,...stat[0]});if(kf[kf.length-1].t<tb)kf.push({t:tb,...stat[1]})}
+          }
+        }
+        tt.push({k:h.k,kf,t0:kf[0].t,t1:kf[kf.length-1].t,n:1});
+      }
+      await sleep(0);
     }
     // faces -> regions
     const smooth=kf=>kf.map((b,i)=>{const n=[kf[Math.max(0,i-1)],b,kf[Math.min(kf.length-1,i+1)]],m=k=>(n[0][k]+n[1][k]+n[2][k])/3;return{t:b.t,x:m('x'),y:m('y'),w:m('w'),h:m('h')}});
@@ -558,7 +603,7 @@ async function scanAll(){
         const nb=[sm[j-1],sm[j+1]].filter(Boolean),mv=Math.max(0,...nb.map(o=>Math.hypot(o.x+o.w/2-b.x-b.w/2,o.y+o.h/2-b.y-b.h/2)));
         const p=Math.max(b.w,b.h)*.35+Math.min(mv*.6,Math.max(b.w,b.h)*.5);return{t:b.t,x:b.x-p,y:b.y-p*1.2,w:b.w+2*p,h:b.h+2.4*p}});
       return{k:'face',label:'Face '+(i+1),on:true,kf,pad:Math.max(.9,fstep*3),thumb:q.thumb}});
-    const textR=tt.filter(q=>q.n>=2||q.k==='email'||dur<=3||q.t1-q.t0>=.45).map(q=>({k:q.k,x:q.x,y:q.y,w:q.w,h:q.h,label:q.k,t0:q.t0,t1:Math.min(q.t1,dur),on:true}));
+    const textR=tt.filter(q=>q.n>=2||q.k==='email'||q.k==='qr'||dur<=3||q.t1-q.t0>=.45).map(q=>({k:q.k,label:q.k==='id'?'ID number':q.k==='qr'?'QR code':q.k,kf:q.kf,pad:.12,on:true}));
     regions=regions.filter(r=>r.k==='area').concat(faceR,textR);
     scanned=true;emptyOk=false;
     const n=faceR.length+textR.length;
